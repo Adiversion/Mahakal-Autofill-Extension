@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Mahakal Darshan Autofill</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <div class="app">
+    <!-- Header -->
+    <header class="header">
+      <div class="header-top">
+        <div class="brand">
+          <img src="../assets/icon-48.png" alt="Mahakal Autofill" class="brand-icon" />
+          <div>
+            <h1 class="brand-title">Mahakal Darshan Autofill</h1>
+            <p class="brand-sub">Bhasma Aarti &amp; Shighra Darshan · 100% Free</p>
+          </div>
+        </div>
+        <div class="header-actions">
+          <button id="btnToggleLang" class="btn-lang" title="Switch English / Hindi">हिं</button>
+          <button id="btnOpenPortal" class="btn-portal" title="Open shrimahakaleshwar.mp.gov.in">
+            Portal ↗
+          </button>
+        </div>
+      </div>
+
+      <!-- Booking Mode Selector -->
+      <div class="mode-bar mode-bar-3" role="tablist" aria-label="Booking type">
+        <button class="mode-pill active" data-mode="sheeghra_darshan">⚡ Sheeghra</button>
+        <button class="mode-pill" data-mode="bhasma_aarti">🔱 Bhasma Aarti</button>
+        <button class="mode-pill" data-mode="advance_bhasma_aarti">📅 Advance Bhasma</button>
+      </div>
+    </header>
+
+    <!-- Main Navigation Tabs -->
+    <nav class="tabs" role="tablist">
+      <button class="tab-btn active" data-tab="devotees">Devotees <span id="devoteeCountBadge" class="badge">0</span></button>
+      <button class="tab-btn" data-tab="contact">Contact &amp; Address</button>
+      <button class="tab-btn" data-tab="tools">Tools &amp; Backup</button>
+    </nav>
+
+    <!-- Status / Feedback Banner -->
+    <div id="statusBanner" class="status-banner hidden" role="status"></div>
+
+    <!-- TAB 1: DEVOTEES -->
+    <section id="tab-devotees" class="tab-panel active">
+      <!-- Smart Page Context & 1-Click Portal Launcher -->
+      <div id="portalLauncher" class="portal-launcher">
+        <div id="portalPageStatus" class="portal-page-status">
+          <span id="portalStatusDot" class="status-dot"></span>
+          <span id="portalStatusText">Choose which Mahakaleshwar page to open:</span>
+          <button type="button" id="btnGoSelectedPage" class="btn-go-page hidden">Open Page ↗</button>
+        </div>
+        <div id="portalQuickGrid" class="portal-quick-grid">
+          <button type="button" class="portal-jump-btn" data-open-mode="sheeghra_darshan">⚡ Sheeghra Darshan ↗</button>
+          <button type="button" class="portal-jump-btn" data-open-mode="bhasma_aarti">🔱 Tatkal Bhasma Aarti ↗</button>
+          <button type="button" class="portal-jump-btn" data-open-mode="advance_bhasma_aarti">📅 Advance Bhasma ↗</button>
+        </div>
+      </div>
+
+      <!-- Live Date, Persons & Available Slot Selector (Sheeghra Darshan) -->
+      <div id="slotPanel" class="slot-panel">
+        <div class="slot-row">
+          <div class="slot-field">
+            <label for="sDate">Darshan Date</label>
+            <input id="sDate" type="date" />
+          </div>
+          <div class="slot-field slot-grow">
+            <label for="sSlot">Available Slot <span id="slotMeta" class="slot-meta"></span></label>
+            <select id="sSlot">
+              <option value="">-- Click Refresh for live slots --</option>
+            </select>
+          </div>
+          <button type="button" id="btnFetchSlots" class="btn-slot-refresh" title="Fetch live available slots for this date">↻</button>
+        </div>
+      </div>
+
+      <div class="action-strip">
+        <button id="btnFillAll" class="btn-primary">
+          ⚡ <span id="lblFillBtn">Set Persons &amp; Fill</span> (<span id="selectedCountLabel">0</span>/6)
+        </button>
+        <button id="btnFillMobile" class="btn-secondary" title="Quick-fill Mobile Number on OTP login screen">📱 OTP Mob</button>
+        <button id="btnAddDevotee" class="btn-secondary">+ Add</button>
+      </div>
+      <p id="lblSafetyNote" class="safety-note">
+        Sets Number of Persons + Slot first, then fills devotee details locally. Pauses for OTP, CAPTCHA &amp; payment.
+      </p>
+
+      <!-- Devotee List -->
+      <div id="devoteeList" class="devotee-list"></div>
+
+      <!-- Empty State -->
+      <div id="emptyDevotees" class="empty-card hidden">
+        <div class="empty-icon">🙏</div>
+        <h3>No Family Devotees Saved Yet</h3>
+        <p>Save up to 20 family members once (encrypted locally on your device) and fill Bhasma Aarti or Shighra Darshan forms in 1 click.</p>
+        <button id="btnEmptyAdd" class="btn-primary">+ Add First Devotee</button>
+      </div>
+    </section>
+
+    <!-- TAB 2: CONTACT & ADDRESS -->
+    <section id="tab-contact" class="tab-panel">
+      <form id="contactForm" class="form-grid" autocomplete="off">
+        <div class="field-row">
+          <div class="field">
+            <label for="cMobile">Mobile Number (OTP Login) *</label>
+            <input id="cMobile" type="tel" maxlength="10" placeholder="10-digit mobile" />
+          </div>
+          <div class="field">
+            <label for="cEmail">Email ID</label>
+            <input id="cEmail" type="email" placeholder="name@example.com" />
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="cAddress">Full Street Address</label>
+          <input id="cAddress" type="text" placeholder="House No, Street, Locality" />
+        </div>
+
+        <div class="field-row">
+          <div class="field">
+            <label for="cCity">City / District</label>
+            <input id="cCity" type="text" placeholder="e.g. Ujjain / Indore" />
+          </div>
+          <div class="field">
+            <label for="cPincode">PIN Code</label>
+            <input id="cPincode" type="text" maxlength="6" placeholder="6-digit PIN" />
+          </div>
+        </div>
+
+        <div class="field-row">
+          <div class="field">
+            <label for="cState">State</label>
+            <select id="cState">
+              <option value="Madhya Pradesh">Madhya Pradesh</option>
+              <option value="Andhra Pradesh">Andhra Pradesh</option>
+              <option value="Arunachal Pradesh">Arunachal Pradesh</option>
+              <option value="Assam">Assam</option>
+              <option value="Bihar">Bihar</option>
+              <option value="Chhattisgarh">Chhattisgarh</option>
+              <option value="Delhi">Delhi</option>
+              <option value="Goa">Goa</option>
+              <option value="Gujarat">Gujarat</option>
+              <option value="Haryana">Haryana</option>
+              <option value="Himachal Pradesh">Himachal Pradesh</option>
+              <option value="Jammu and Kashmir">Jammu and Kashmir</option>
+              <option value="Jharkhand">Jharkhand</option>
+              <option value="Karnataka">Karnataka</option>
+              <option value="Kerala">Kerala</option>
+              <option value="Maharashtra">Maharashtra</option>
+              <option value="Manipur">Manipur</option>
+              <option value="Meghalaya">Meghalaya</option>
+              <option value="Mizoram">Mizoram</option>
+              <option value="Nagaland">Nagaland</option>
+              <option value="Odisha">Odisha</option>
+              <option value="Punjab">Punjab</option>
+              <option value="Rajasthan">Rajasthan</option>
+              <option value="Sikkim">Sikkim</option>
+              <option value="Tamil Nadu">Tamil Nadu</option>
+              <option value="Telangana">Telangana</option>
+              <option value="Tripura">Tripura</option>
+              <option value="Uttar Pradesh">Uttar Pradesh</option>
+              <option value="Uttarakhand">Uttarakhand</option>
+              <option value="West Bengal">West Bengal</option>
+              <option value="Chandigarh">Chandigarh</option>
+              <option value="Puducherry">Puducherry</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="cCountry">Country</label>
+            <input id="cCountry" type="text" value="India" />
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="cGotra">Gotra (Optional — for Puja/Aarti forms)</label>
+          <input id="cGotra" type="text" placeholder="e.g. Kashyap, Bharadwaj" />
+        </div>
+
+        <div class="btn-row">
+          <button type="submit" class="btn-primary">💾 Save Contact Details</button>
+          <button type="button" id="btnFillContact" class="btn-secondary">⚡ Fill Contact on Page</button>
+        </div>
+      </form>
+    </section>
+
+    <!-- TAB 3: TOOLS & BACKUP -->
+    <section id="tab-tools" class="tab-panel">
+      <div class="tool-card">
+        <h3>🔍 Portal Form Inspector</h3>
+        <p>Inspect the currently open Mahakaleshwar page to see detected input fields and copy a field report if the portal changes its layout.</p>
+        <div class="btn-row">
+          <button id="btnInspectPage" class="btn-secondary">Inspect Open Page</button>
+          <button id="btnCopyInspect" class="btn-ghost hidden">Copy Field Map</button>
+        </div>
+        <pre id="inspectOutput" class="inspect-output hidden"></pre>
+      </div>
+
+      <div class="tool-card">
+        <h3>🔐 Local Encrypted Vault Backup</h3>
+        <p>All Aadhaar numbers, devotee details &amp; photos are encrypted locally with AES-256-GCM and never leave your browser. Export to transfer to another PC.</p>
+        <div class="btn-row">
+          <button id="btnExportVault" class="btn-secondary">⬇ Export Backup (.json)</button>
+          <label class="btn-ghost file-btn">
+            ⬆ Import Backup
+            <input id="inputImportVault" type="file" accept=".json,application/json" hidden />
+          </label>
+        </div>
+      </div>
+
+      <div class="tool-card subtle">
+        <h3>🛕 Quick Official Portal Links</h3>
+        <div class="quick-links">
+          <a href="https://www.shrimahakaleshwar.mp.gov.in/services/slot-booking?type=sheeghra-darshan" target="_blank" rel="noopener">Sheeghra Darshan ↗</a>
+          <a href="https://www.shrimahakaleshwar.mp.gov.in/services/bhasmaarti" target="_blank" rel="noopener">Bhasma Aarti ↗</a>
+          <a href="https://www.shrimahakaleshwar.mp.gov.in/services/advance-bhasmaarti" target="_blank" rel="noopener">Advance Bhasma Aarti ↗</a>
+        </div>
+      </div>
+    </section>
+
+    <!-- MODAL: ADD / EDIT DEVOTEE -->
+    <div id="devoteeModal" class="modal hidden" role="dialog" aria-modal="true">
+      <div class="modal-card">
+        <div class="modal-header">
+          <h2 id="modalTitle">Add Devotee</h2>
+          <button id="btnCloseModal" class="icon-close" aria-label="Close">✕</button>
+        </div>
+        <form id="devoteeForm" class="form-grid" autocomplete="off">
+          <input type="hidden" id="dId" />
+
+          <div class="field-row field-row-name-age">
+            <div class="field">
+              <label for="dName">Name *</label>
+              <input id="dName" type="text" required placeholder="Exact match to Govt ID" />
+            </div>
+            <div class="field">
+              <label for="dAge">Age *</label>
+              <input id="dAge" type="number" min="1" max="120" required placeholder="e.g. 34" />
+            </div>
+          </div>
+
+          <div class="field-row">
+            <div class="field">
+              <label for="dGender">Gender *</label>
+              <select id="dGender" required>
+                <option value="Male">Male</option>
+                <option value="Female">Female</option>
+                <option value="Other">Other</option>
+              </select>
+            </div>
+            <div class="field">
+              <label for="dIdType">ID Proof Type *</label>
+              <select id="dIdType" required>
+                <option value="Aadhaar Card">Aadhaar Card</option>
+                <option value="Passport">Passport</option>
+              </select>
+            </div>
+          </div>
+
+          <div class="field">
+            <label for="dIdNumber">ID Proof Number *</label>
+            <input id="dIdNumber" type="text" required placeholder="12-digit Aadhaar or Passport No." />
+          </div>
+
+          <details id="bhasmaExtras" class="extras-box">
+            <summary>Optional: Bhasma Aarti Extras (Relation &amp; Photo)</summary>
+            <div class="extras-body">
+              <div class="field">
+                <label for="dRelation">Relation</label>
+                <select id="dRelation">
+                  <option value="Self">Self</option>
+                  <option value="Wife">Wife</option>
+                  <option value="Husband">Husband</option>
+                  <option value="Father">Father</option>
+                  <option value="Mother">Mother</option>
+                  <option value="Son">Son</option>
+                  <option value="Daughter">Daughter</option>
+                  <option value="Brother">Brother</option>
+                  <option value="Sister">Sister</option>
+                  <option value="Friends">Friends</option>
+                </select>
+              </div>
+              <div class="field-row">
+                <div class="field">
+                  <label>Devotee Photo</label>
+                  <label class="upload-box" id="photoUploadLabel">
+                    <img id="photoThumb" class="upload-thumb hidden" alt="Photo preview" />
+                    <span id="photoPreviewText">📷 Upload Photo</span>
+                    <input id="dPhotoFile" type="file" accept="image/*" hidden />
+                  </label>
+                  <button type="button" id="btnClearPhoto" class="link-danger hidden">Remove photo</button>
+                </div>
+                <div class="field">
+                  <label>ID Proof Image</label>
+                  <label class="upload-box" id="idUploadLabel">
+                    <img id="idThumb" class="upload-thumb hidden" alt="ID scan preview" />
+                    <span id="idPreviewText">🪪 Upload ID Scan</span>
+                    <input id="dIdFile" type="file" accept="image/*" hidden />
+                  </label>
+                  <button type="button" id="btnClearIdFile" class="link-danger hidden">Remove ID scan</button>
+                </div>
+              </div>
+            </div>
+          </details>
+
+          <div class="btn-row modal-actions">
+            <button type="button" id="btnCancelModal" class="btn-ghost">Cancel</button>
+            <button type="submit" class="btn-primary">Save Devotee</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- Tasteful Ad / KasyHQ Spotlight Slot (100% Free Ad-Supported Footer) -->
+    <footer id="adCard" class="ad-card">
+      <div class="ad-top">
+        <span class="ad-tag" id="adTag">SPONSORED</span>
+        <a id="adCta" class="ad-cta" href="https://kasyhq.com" target="_blank" rel="noopener">Explore →</a>
+      </div>
+      <div class="ad-title" id="adTitle">Free by KasyHQ · Creators of ReturnPilot GST &amp; TDS</div>
+      <div class="ad-desc" id="adDesc">1-click GST &amp; Income Tax portal automation built for Indian CAs &amp; practices.</div>
+    </footer>
+  </div>
+
+  <script type="module" src="popup.js"></script>
+</body>
+</html>
