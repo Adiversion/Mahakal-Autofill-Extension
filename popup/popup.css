@@ -250,6 +250,11 @@ body {
   box-shadow: 0 0 0 3px rgba(16, 185, 129, 0.18);
 }
 
+.status-dot.closed {
+  background: #dc2626;
+  box-shadow: 0 0 0 3px rgba(220, 38, 38, 0.16);
+}
+
 .btn-go-page {
   margin-left: auto;
   background: #fdf6ec;
@@ -294,6 +299,12 @@ body {
   background: var(--ok-bg);
   color: var(--ok-text);
   border: 1px solid var(--ok-border);
+}
+
+.window-badge.closed {
+  background: var(--err-bg);
+  color: var(--err-text);
+  border: 1px solid var(--err-border);
 }
 
 .req-summary {

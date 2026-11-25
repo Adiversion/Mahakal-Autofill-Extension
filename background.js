@@ -252,6 +252,79 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
+  if (msg.type === 'READ_LIVE_PAGE_STATUS') {
+    (async () => {
+      try {
+        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (!tab?.id || !PORTAL_HOST_PATTERN.test(new URL(tab.url || 'https://invalid').hostname)) {
+          return sendResponse({ ok: false });
+        }
+        const exec = await chrome.scripting.executeScript({
+          target: { tabId: tab.id, allFrames: false },
+          func: () => {
+            const isVis = (el) => {
+              if (!el) return false;
+              const s = window.getComputedStyle(el);
+              if (s.display === 'none' || s.visibility === 'hidden' || s.opacity === '0') return false;
+              const r = el.getBoundingClientRect();
+              return r.width > 0 && r.height > 0;
+            };
+            const cleanText = (el) => String(el?.innerText || el?.textContent || '').replace(/\s+/g, ' ').trim();
+            const firstVisibleText = (selector) => {
+              for (const el of document.querySelectorAll(selector)) {
+                if (!isVis(el)) continue;
+                const t = cleanText(el);
+                if (t) return t;
+              }
+              return '';
+            };
+
+            const dangerAlert = firstVisibleText('.alert-danger, .alert.alert-danger, [class*="alert-danger"]');
+            const successAlert = firstVisibleText('.alert-success, .alert.alert-success');
+            let infoAlert = firstVisibleText('.alert-warning, .alert-info');
+            if (!infoAlert) {
+              for (const p of document.querySelectorAll('p, h5, h6, div.alert')) {
+                if (!isVis(p)) continue;
+                const t = cleanText(p);
+                if (t.length >= 15 && t.length <= 220 && /(will be open on|booking is closed|booking is not allowed|quota not available|slots are full|restricted for booking|booking opens at|booking window)/i.test(t)) {
+                  infoAlert = t;
+                  break;
+                }
+              }
+            }
+
+            let dateText = '';
+            for (const el of document.querySelectorAll('h5, h6, p, div, span')) {
+              if (!isVis(el)) continue;
+              const t = cleanText(el);
+              if (/^date of visit\s*:/i.test(t) && t.length <= 60) {
+                dateText = t;
+                break;
+              }
+            }
+
+            const hasForm = Array.from(
+              document.querySelectorAll('.visitor_row, form select, form input:not([type="hidden"])')
+            ).some(isVis);
+
+            return {
+              ok: true,
+              hasForm,
+              dangerAlert,
+              successAlert,
+              infoAlert,
+              dateText,
+            };
+          },
+        });
+        return sendResponse(exec?.[0]?.result || { ok: false });
+      } catch (_) {
+        return sendResponse({ ok: false });
+      }
+    })();
+    return true;
+  }
+
   if (msg.type === 'MAIN_WORLD_SET_FIELD') {
     const tabId = sender?.tab?.id;
     if (!tabId) {

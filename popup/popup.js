@@ -41,6 +41,25 @@ let lastInspectJson = '';
 let activeTabInfo = { id: null, url: '', detectedMode: null, onPortal: false };
 let cachedRestrictedDates = null;
 let cachedAdvanceBhasma = null;
+let lastLivePageStatus = null;
+
+async function readLivePageStatus(forceRefresh = false) {
+  if (!activeTabInfo.onPortal || activeTabInfo.detectedMode !== vault.bookingMode) {
+    lastLivePageStatus = null;
+    return null;
+  }
+  if (!forceRefresh && lastLivePageStatus && lastLivePageStatus.mode === vault.bookingMode) {
+    return lastLivePageStatus;
+  }
+  const res = await new Promise((resolve) => {
+    chrome.runtime.sendMessage({ type: 'READ_LIVE_PAGE_STATUS' }, (r) => {
+      if (chrome.runtime.lastError) return resolve({ ok: false });
+      resolve(r || { ok: false });
+    });
+  });
+  lastLivePageStatus = res?.ok ? { ...res, mode: vault.bookingMode } : null;
+  return lastLivePageStatus;
+}
 
 function formatCompactDates(isoList) {
   if (!isoList || isoList.length === 0) return '';
@@ -136,7 +155,8 @@ async function renderServiceLiveInfo(forceRefresh = false) {
   const badge = $('serviceWindowBadge');
   const reqEl = $('serviceReqSummary');
   const schedEl = $('serviceScheduleText');
-  if (refreshBtn) refreshBtn.classList.toggle('hidden', mode !== 'advance_bhasma_aarti');
+  const isMatched = activeTabInfo.onPortal && activeTabInfo.detectedMode === mode;
+  if (refreshBtn) refreshBtn.classList.toggle('hidden', mode !== 'advance_bhasma_aarti' && !isMatched);
   const ist = getIstParts();
   const mins = ist.hour * 60 + ist.minute;
 
@@ -170,6 +190,45 @@ async function renderServiceLiveInfo(forceRefresh = false) {
     return;
   }
 
+  const reqByMode = {
+    bhasma_aarti: 'Needs: Name, Photo, Relation, ID',
+    sandhya_aarti: 'Needs: Name, Age, Gender, Photo, ID',
+    shayan_aarti: 'Needs: Name, Age, Gender, Photo, ID',
+    dharmshala: 'Needs: Devotees + Contact/Address tab',
+  };
+  reqEl.textContent = reqByMode[mode] || '';
+
+  // When already on the matching live portal page, read the actual rendered status banner/form state first!
+  if (isMatched) {
+    const live = await readLivePageStatus(forceRefresh);
+    if (vault.bookingMode !== mode) return;
+    renderPortalLauncher(live);
+
+    if (live?.dangerAlert) {
+      badge.className = 'window-badge closed';
+      badge.textContent = '✕ Quota Full / Not Available on Page';
+      const datePrefix = live.dateText ? `${live.dateText} · ` : '';
+      schedEl.textContent = `${datePrefix}Website says: "${live.dangerAlert}"`;
+      return;
+    }
+    if (live?.hasForm) {
+      badge.className = 'window-badge open';
+      badge.textContent = '● Booking Open — Form Ready';
+      const datePrefix = live.dateText ? `${live.dateText} · ` : '';
+      schedEl.textContent = live.successAlert
+        ? `${datePrefix}${live.successAlert}`
+        : `${datePrefix}Live booking form detected on page. Select devotees & click Set Persons & Fill.`;
+      return;
+    }
+    if (live?.infoAlert) {
+      badge.className = 'window-badge';
+      badge.textContent = '⏰ Closed / Waiting on Page';
+      const datePrefix = live.dateText ? `${live.dateText} · ` : '';
+      schedEl.textContent = `${datePrefix}Website says: "${live.infoAlert}"`;
+      return;
+    }
+  }
+
   const allRestricted = await fetchRestrictedDatesCached();
   const upcomingBlocked = allRestricted
     .filter((r) => {
@@ -186,30 +245,26 @@ async function renderServiceLiveInfo(forceRefresh = false) {
 
   const blockedNote = upcomingBlocked.length > 0
     ? ` · Restricted dates: ${upcomingBlocked.join(', ')}`
-    : ' · No upcoming restricted dates reported';
+    : '';
 
   if (mode === 'bhasma_aarti') {
     const isOpen = ist.hour >= 8;
-    badge.className = isOpen ? 'window-badge open' : 'window-badge';
-    badge.textContent = isOpen ? '● Tatkal Window Active (8 AM+ IST)' : '⏰ Opens Today 8:00 AM IST';
-    reqEl.textContent = 'Needs: Name, Photo, Relation, ID';
-    schedEl.textContent = `Daily Tatkal Bhasma Aarti opens at 8:00 AM IST for the day after tomorrow (₹200/person)${blockedNote}.`;
+    badge.className = 'window-badge';
+    badge.textContent = isOpen ? '⏰ Window Active (8 AM+ IST)' : '⏰ Opens Today 8:00 AM IST';
+    schedEl.textContent = `Daily Tatkal Bhasma Aarti opens at 8:00 AM IST for day after tomorrow (₹200/person). Open page to check live quota${blockedNote}.`;
   } else if (mode === 'sandhya_aarti') {
     const isOpen = mins >= 12 * 60 && mins < 18 * 60 + 30;
-    badge.className = isOpen ? 'window-badge open' : 'window-badge';
-    badge.textContent = isOpen ? '● OPEN NOW (12:00 PM – 6:30 PM IST)' : '⏰ Opens Daily 12:00 PM – 6:30 PM IST';
-    reqEl.textContent = 'Needs: Name, Age, Gender, Photo, ID';
-    schedEl.textContent = `Same-day Sandhya Aarti booking for ${ist.ddmmyyyy}${blockedNote}.`;
+    badge.className = 'window-badge';
+    badge.textContent = isOpen ? '⏰ Window Active (12:00 – 6:30 PM IST)' : '⏰ Opens Daily 12:00 PM – 6:30 PM IST';
+    schedEl.textContent = `Same-day Sandhya Aarti (${ist.ddmmyyyy}). Open page to verify live quota availability${blockedNote}.`;
   } else if (mode === 'shayan_aarti') {
     const isOpen = ist.hour >= 16 && ist.hour < 22;
-    badge.className = isOpen ? 'window-badge open' : 'window-badge';
-    badge.textContent = isOpen ? '● OPEN NOW (4:00 PM – 10:00 PM IST)' : '⏰ Opens Daily 4:00 PM – 10:00 PM IST';
-    reqEl.textContent = 'Needs: Name, Age, Gender, Photo, ID';
-    schedEl.textContent = `Same-day Shayan Aarti booking for ${ist.ddmmyyyy}${blockedNote}.`;
+    badge.className = 'window-badge';
+    badge.textContent = isOpen ? '⏰ Window Active (4:00 – 10:00 PM IST)' : '⏰ Opens Daily 4:00 PM – 10:00 PM IST';
+    schedEl.textContent = `Same-day Shayan Aarti (${ist.ddmmyyyy}). Open page to verify live quota availability${blockedNote}.`;
   } else if (mode === 'dharmshala') {
     badge.className = 'window-badge open';
     badge.textContent = '● Live Room Availability on Portal';
-    reqEl.textContent = 'Needs: Devotees + Contact/Address tab';
     schedEl.textContent = `Pick check-in/out dates on Dharmshala page, then click Fill to populate visitors & address.`;
   }
 }
@@ -316,7 +371,7 @@ async function openPortalModePage(mode) {
   }
 }
 
-function renderPortalLauncher() {
+function renderPortalLauncher(liveStatus = null) {
   const dot = $('portalStatusDot');
   const txt = $('portalStatusText');
   const btnGo = $('btnGoSelectedPage');
@@ -325,8 +380,16 @@ function renderPortalLauncher() {
   const isMatched = activeTabInfo.onPortal && activeTabInfo.detectedMode === vault.bookingMode;
 
   if (isMatched) {
-    dot.className = 'status-dot connected';
-    txt.textContent = `Connected: ${MODE_LABELS[vault.bookingMode]} — Ready to Fill`;
+    if (liveStatus?.dangerAlert) {
+      dot.className = 'status-dot closed';
+      txt.textContent = `${MODE_LABELS[vault.bookingMode]} — Quota Full / Unavailable on Page`;
+    } else if (liveStatus && !liveStatus.hasForm && liveStatus.infoAlert) {
+      dot.className = 'status-dot';
+      txt.textContent = `${MODE_LABELS[vault.bookingMode]} — Booking Closed on Page`;
+    } else {
+      dot.className = 'status-dot connected';
+      txt.textContent = `Connected: ${MODE_LABELS[vault.bookingMode]} — Ready to Fill`;
+    }
     btnGo.classList.add('hidden');
   } else if (activeTabInfo.onPortal && activeTabInfo.detectedMode) {
     dot.className = 'status-dot';
