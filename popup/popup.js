@@ -40,6 +40,64 @@ let draftIdScan = null;
 let lastInspectJson = '';
 let activeTabInfo = { id: null, url: '', detectedMode: null, onPortal: false };
 let cachedRestrictedDates = null;
+let cachedAdvanceBhasma = null;
+
+function formatCompactDates(isoList) {
+  if (!isoList || isoList.length === 0) return '';
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  return isoList
+    .map((s) => {
+      const m = String(s).match(/^(\d{4})-(\d{2})-(\d{2})/);
+      return m ? `${Number(m[3])} ${months[Number(m[2]) - 1]}` : s;
+    })
+    .join(', ');
+}
+
+function getMonthRange(year, monthIndex0) {
+  const start = `${year}-${String(monthIndex0 + 1).padStart(2, '0')}-01`;
+  const lastDay = new Date(year, monthIndex0 + 1, 0).getDate();
+  const end = `${year}-${String(monthIndex0 + 1).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  return { start, end, label: `${months[monthIndex0]} ${year}` };
+}
+
+async function fetchAdvanceBhasmaOpenDates(forceRefresh = false) {
+  if (!forceRefresh && cachedAdvanceBhasma) return cachedAdvanceBhasma;
+
+  const nowIst = new Date(Date.now() + 5.5 * 60 * 60 * 1000);
+  const todayIso = nowIst.toISOString().slice(0, 10);
+  const y = nowIst.getUTCFullYear();
+  const m = nowIst.getUTCMonth();
+  const m0 = getMonthRange(y, m);
+  const m1 = getMonthRange(m === 11 ? y + 1 : y, (m + 1) % 12);
+  const m2 = getMonthRange(m >= 10 ? y + 1 : y, (m + 2) % 12);
+
+  const fetchRange = (range) =>
+    new Promise((resolve) => {
+      chrome.runtime.sendMessage(
+        { type: 'FETCH_ADVANCE_BHASMA_DATES', startDate: range.start, endDate: range.end },
+        (r) => {
+          if (chrome.runtime.lastError) return resolve({ ok: false, days: [] });
+          resolve(r || { ok: false, days: [] });
+        }
+      );
+    });
+
+  const [r0, r1, r2] = await Promise.all([fetchRange(m0), fetchRange(m1), fetchRange(m2)]);
+  const allDays = [...(r0.days || []), ...(r1.days || []), ...(r2.days || [])].filter(
+    (d) => String(d?.date || '') >= todayIso
+  );
+  const openDates = allDays.filter((d) => d.limit_available && !d.is_restricted).map((d) => d.date);
+  const restrictedDates = allDays.filter((d) => d.is_restricted).map((d) => d.date);
+
+  cachedAdvanceBhasma = {
+    ok: Boolean(r0.ok || r1.ok || r2.ok),
+    windowLabel: `${m0.label} – ${m2.label}`,
+    openDates,
+    restrictedDates,
+  };
+  return cachedAdvanceBhasma;
+}
 
 function getIstParts() {
   const ist = new Date(Date.now() + 5.5 * 60 * 60 * 1000);
@@ -63,9 +121,10 @@ async function fetchRestrictedDatesCached() {
   return cachedRestrictedDates;
 }
 
-async function renderServiceLiveInfo() {
+async function renderServiceLiveInfo(forceRefresh = false) {
   const infoBox = $('serviceLiveInfo');
   const sheeghraBox = $('sheeghraSlotControls');
+  const refreshBtn = $('btnRefreshServiceInfo');
   if (!infoBox || !sheeghraBox) return;
 
   const mode = vault.bookingMode;
@@ -77,8 +136,39 @@ async function renderServiceLiveInfo() {
   const badge = $('serviceWindowBadge');
   const reqEl = $('serviceReqSummary');
   const schedEl = $('serviceScheduleText');
+  if (refreshBtn) refreshBtn.classList.toggle('hidden', mode !== 'advance_bhasma_aarti');
   const ist = getIstParts();
   const mins = ist.hour * 60 + ist.minute;
+
+  if (mode === 'advance_bhasma_aarti') {
+    badge.className = 'window-badge';
+    badge.textContent = 'Checking live dates...';
+    reqEl.textContent = 'Needs: Name, Photo, Relation, ID';
+    schedEl.textContent = 'Checking Advance Bhasma Aarti calendar availability...';
+    const adv = await fetchAdvanceBhasmaOpenDates(forceRefresh);
+    if (vault.bookingMode !== 'advance_bhasma_aarti') return;
+    if (!adv.ok) {
+      badge.className = 'window-badge';
+      badge.textContent = '● Advance Calendar';
+      schedEl.textContent = 'Open Advance Bhasma page and click ↻ to check live open dates (₹200/person).';
+      return;
+    }
+    if (adv.openDates.length > 0) {
+      badge.className = 'window-badge open';
+      badge.textContent = `● ${adv.openDates.length} Open Date(s) (${adv.windowLabel})`;
+      const preview = formatCompactDates(adv.openDates.slice(0, 8));
+      const more = adv.openDates.length > 8 ? ` +${adv.openDates.length - 8} more` : '';
+      schedEl.textContent = `Green available dates: ${preview}${more}. Open Advance Bhasma page to select & fill!`;
+    } else {
+      badge.className = 'window-badge';
+      badge.textContent = `● 0 Open Dates (${adv.windowLabel})`;
+      const restrPreview = adv.restrictedDates.length > 0
+        ? ` Restricted: ${formatCompactDates(adv.restrictedDates.slice(0, 6))}${adv.restrictedDates.length > 6 ? ` (+${adv.restrictedDates.length - 6})` : ''}.`
+        : '';
+      schedEl.textContent = `All dates currently grey/full in ${adv.windowLabel}.${restrPreview} Click ↻ later to re-check.`;
+    }
+    return;
+  }
 
   const allRestricted = await fetchRestrictedDatesCached();
   const upcomingBlocked = allRestricted
@@ -88,7 +178,7 @@ async function renderServiceLiveInfo() {
       if (!d || d < ist.iso) return false;
       if (mode === 'sandhya_aarti') return slug.includes('sandhya');
       if (mode === 'shayan_aarti') return slug.includes('shayan');
-      if (mode === 'bhasma_aarti' || mode === 'advance_bhasma_aarti') return slug.includes('bhasm');
+      if (mode === 'bhasma_aarti') return slug.includes('bhasm');
       return true;
     })
     .slice(0, 3)
@@ -104,11 +194,6 @@ async function renderServiceLiveInfo() {
     badge.textContent = isOpen ? '● Tatkal Window Active (8 AM+ IST)' : '⏰ Opens Today 8:00 AM IST';
     reqEl.textContent = 'Needs: Name, Photo, Relation, ID';
     schedEl.textContent = `Daily Tatkal Bhasma Aarti opens at 8:00 AM IST for the day after tomorrow (₹200/person)${blockedNote}.`;
-  } else if (mode === 'advance_bhasma_aarti') {
-    badge.className = 'window-badge open';
-    badge.textContent = '● Advance Request Calendar';
-    reqEl.textContent = 'Needs: Name, Photo, Relation, ID';
-    schedEl.textContent = `Open Advance Bhasma page to pick any green available date on the calendar (₹200/person)${blockedNote}.`;
   } else if (mode === 'sandhya_aarti') {
     const isOpen = mins >= 12 * 60 && mins < 18 * 60 + 30;
     badge.className = isOpen ? 'window-badge open' : 'window-badge';
@@ -748,6 +833,10 @@ function bindEvents() {
     const d = $('sDate')?.value || getDefaultTomorrowIso();
     $('sDate').value = d;
     fetchLiveSheeghraSlots(d, false);
+  });
+
+  $('btnRefreshServiceInfo')?.addEventListener('click', () => {
+    renderServiceLiveInfo(true);
   });
 
   $('btnToggleLang').addEventListener('click', async () => {

@@ -210,6 +210,48 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
+  if (msg.type === 'FETCH_ADVANCE_BHASMA_DATES') {
+    (async () => {
+      const startDate = String(msg.startDate || '').trim();
+      const endDate = String(msg.endDate || '').trim();
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(startDate) || !/^\d{4}-\d{2}-\d{2}$/.test(endDate)) {
+        return sendResponse({ ok: false, error: 'Invalid date range.' });
+      }
+      const apiUrl = `https://prod-api.mahakal.brainabove.net/public/api/v1/bhasmarti_general_limit_check?start_date=${encodeURIComponent(startDate)}&end_date=${encodeURIComponent(endDate)}`;
+      try {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 8000);
+        const res = await fetch(apiUrl, { signal: controller.signal, cache: 'no-store' });
+        clearTimeout(timer);
+        if (res.ok) {
+          const json = await res.json();
+          return sendResponse({ ok: true, days: Array.isArray(json?.data) ? json.data : [] });
+        }
+      } catch (_) {}
+
+      try {
+        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (tab?.id && /shrimahakaleshwar\.mp\.gov\.in/i.test(tab.url || '')) {
+          const exec = await chrome.scripting.executeScript({
+            target: { tabId: tab.id },
+            args: [apiUrl],
+            func: async (u) => {
+              const r = await fetch(u, { cache: 'no-store' });
+              if (!r.ok) return { ok: false };
+              const j = await r.json();
+              return { ok: true, days: Array.isArray(j?.data) ? j.data : [] };
+            },
+          });
+          const out = exec?.[0]?.result;
+          if (out?.ok) return sendResponse({ ok: true, days: out.days });
+        }
+      } catch (_) {}
+
+      return sendResponse({ ok: false, days: [] });
+    })();
+    return true;
+  }
+
   if (msg.type === 'MAIN_WORLD_SET_FIELD') {
     const tabId = sender?.tab?.id;
     if (!tabId) {
