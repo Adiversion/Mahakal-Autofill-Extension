@@ -173,6 +173,43 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
+  if (msg.type === 'FETCH_RESTRICTED_DATES') {
+    (async () => {
+      const apiUrl = 'https://prod-api.mahakal.brainabove.net/public/api/v1/restricted_dates';
+      try {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 7000);
+        const res = await fetch(apiUrl, { signal: controller.signal, cache: 'no-store' });
+        clearTimeout(timer);
+        if (res.ok) {
+          const json = await res.json();
+          return sendResponse({ ok: true, dates: Array.isArray(json?.data) ? json.data : [] });
+        }
+      } catch (_) {}
+
+      try {
+        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (tab?.id && /shrimahakaleshwar\.mp\.gov\.in/i.test(tab.url || '')) {
+          const exec = await chrome.scripting.executeScript({
+            target: { tabId: tab.id },
+            args: [apiUrl],
+            func: async (u) => {
+              const r = await fetch(u, { cache: 'no-store' });
+              if (!r.ok) return { ok: false };
+              const j = await r.json();
+              return { ok: true, dates: Array.isArray(j?.data) ? j.data : [] };
+            },
+          });
+          const out = exec?.[0]?.result;
+          if (out?.ok) return sendResponse({ ok: true, dates: out.dates });
+        }
+      } catch (_) {}
+
+      return sendResponse({ ok: false, dates: [] });
+    })();
+    return true;
+  }
+
   if (msg.type === 'MAIN_WORLD_SET_FIELD') {
     const tabId = sender?.tab?.id;
     if (!tabId) {

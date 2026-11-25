@@ -35,6 +35,95 @@ let draftPhoto = null;
 let draftIdScan = null;
 let lastInspectJson = '';
 let activeTabInfo = { id: null, url: '', detectedMode: null, onPortal: false };
+let cachedRestrictedDates = null;
+
+function getIstParts() {
+  const ist = new Date(Date.now() + 5.5 * 60 * 60 * 1000);
+  return {
+    hour: ist.getUTCHours(),
+    minute: ist.getUTCMinutes(),
+    iso: ist.toISOString().slice(0, 10),
+    ddmmyyyy: `${String(ist.getUTCDate()).padStart(2, '0')}-${String(ist.getUTCMonth() + 1).padStart(2, '0')}-${ist.getUTCFullYear()}`,
+  };
+}
+
+async function fetchRestrictedDatesCached() {
+  if (cachedRestrictedDates !== null) return cachedRestrictedDates;
+  const res = await new Promise((resolve) => {
+    chrome.runtime.sendMessage({ type: 'FETCH_RESTRICTED_DATES' }, (r) => {
+      if (chrome.runtime.lastError) return resolve({ ok: false, dates: [] });
+      resolve(r || { ok: false, dates: [] });
+    });
+  });
+  cachedRestrictedDates = Array.isArray(res.dates) ? res.dates : [];
+  return cachedRestrictedDates;
+}
+
+async function renderServiceLiveInfo() {
+  const infoBox = $('serviceLiveInfo');
+  const sheeghraBox = $('sheeghraSlotControls');
+  if (!infoBox || !sheeghraBox) return;
+
+  const mode = vault.bookingMode;
+  const isSheeghra = mode === 'sheeghra_darshan';
+  sheeghraBox.classList.toggle('hidden', !isSheeghra);
+  infoBox.classList.toggle('hidden', isSheeghra);
+  if (isSheeghra) return;
+
+  const badge = $('serviceWindowBadge');
+  const reqEl = $('serviceReqSummary');
+  const schedEl = $('serviceScheduleText');
+  const ist = getIstParts();
+  const mins = ist.hour * 60 + ist.minute;
+
+  const allRestricted = await fetchRestrictedDatesCached();
+  const upcomingBlocked = allRestricted
+    .filter((r) => {
+      const slug = String(r?.darshan_type?.slug || '').toLowerCase();
+      const d = String(r?.date || '').slice(0, 10);
+      if (!d || d < ist.iso) return false;
+      if (mode === 'sandhya_aarti') return slug.includes('sandhya');
+      if (mode === 'shayan_aarti') return slug.includes('shayan');
+      if (mode === 'bhasma_aarti' || mode === 'advance_bhasma_aarti') return slug.includes('bhasm');
+      return true;
+    })
+    .slice(0, 3)
+    .map((r) => String(r.date).slice(0, 10));
+
+  const blockedNote = upcomingBlocked.length > 0
+    ? ` · Restricted dates: ${upcomingBlocked.join(', ')}`
+    : ' · No upcoming restricted dates reported';
+
+  if (mode === 'bhasma_aarti') {
+    const isOpen = ist.hour >= 8;
+    badge.className = isOpen ? 'window-badge open' : 'window-badge';
+    badge.textContent = isOpen ? '● Tatkal Window Active (8 AM+ IST)' : '⏰ Opens Today 8:00 AM IST';
+    reqEl.textContent = 'Needs: Name, Photo, Relation, ID';
+    schedEl.textContent = `Daily Tatkal Bhasma Aarti opens at 8:00 AM IST for the day after tomorrow (₹200/person)${blockedNote}.`;
+  } else if (mode === 'advance_bhasma_aarti') {
+    badge.className = 'window-badge open';
+    badge.textContent = '● Advance Request Calendar';
+    reqEl.textContent = 'Needs: Name, Photo, Relation, ID';
+    schedEl.textContent = `Open Advance Bhasma page to pick any green available date on the calendar (₹200/person)${blockedNote}.`;
+  } else if (mode === 'sandhya_aarti') {
+    const isOpen = mins >= 12 * 60 && mins < 18 * 60 + 30;
+    badge.className = isOpen ? 'window-badge open' : 'window-badge';
+    badge.textContent = isOpen ? '● OPEN NOW (12:00 PM – 6:30 PM IST)' : '⏰ Opens Daily 12:00 PM – 6:30 PM IST';
+    reqEl.textContent = 'Needs: Name, Age, Gender, Photo, ID';
+    schedEl.textContent = `Same-day Sandhya Aarti booking for ${ist.ddmmyyyy}${blockedNote}.`;
+  } else if (mode === 'shayan_aarti') {
+    const isOpen = ist.hour >= 16 && ist.hour < 22;
+    badge.className = isOpen ? 'window-badge open' : 'window-badge';
+    badge.textContent = isOpen ? '● OPEN NOW (4:00 PM – 10:00 PM IST)' : '⏰ Opens Daily 4:00 PM – 10:00 PM IST';
+    reqEl.textContent = 'Needs: Name, Age, Gender, Photo, ID';
+    schedEl.textContent = `Same-day Shayan Aarti booking for ${ist.ddmmyyyy}${blockedNote}.`;
+  } else if (mode === 'dharmshala') {
+    badge.className = 'window-badge open';
+    badge.textContent = '● Live Room Availability on Portal';
+    reqEl.textContent = 'Needs: Devotees + Contact/Address tab';
+    schedEl.textContent = `Pick check-in/out dates on Dharmshala page, then click Fill to populate visitors & address.`;
+  }
+}
 
 const $ = (id) => document.getElementById(id);
 
@@ -141,45 +230,33 @@ function renderPortalLauncher() {
   const dot = $('portalStatusDot');
   const txt = $('portalStatusText');
   const btnGo = $('btnGoSelectedPage');
-  const quickGrid = $('portalQuickGrid');
-  if (!dot || !txt || !btnGo || !quickGrid) return;
+  if (!dot || !txt || !btnGo) return;
 
   const isMatched = activeTabInfo.onPortal && activeTabInfo.detectedMode === vault.bookingMode;
 
   if (isMatched) {
     dot.className = 'status-dot connected';
-    txt.textContent = `Connected to ${MODE_LABELS[vault.bookingMode]} — Ready to Fill`;
+    txt.textContent = `Connected: ${MODE_LABELS[vault.bookingMode]} — Ready to Fill`;
     btnGo.classList.add('hidden');
   } else if (activeTabInfo.onPortal && activeTabInfo.detectedMode) {
     dot.className = 'status-dot';
     txt.textContent = `Tab is on ${MODE_LABELS[activeTabInfo.detectedMode]}`;
-    btnGo.textContent = `Open ${MODE_LABELS[vault.bookingMode]} ↗`;
+    btnGo.textContent = `Switch to ${MODE_LABELS[vault.bookingMode]} ↗`;
     btnGo.classList.remove('hidden');
-  } else if (activeTabInfo.onPortal) {
-    dot.className = 'status-dot';
-    txt.textContent = 'On Mahakaleshwar Portal — Pick booking page:';
-    btnGo.classList.add('hidden');
   } else {
     dot.className = 'status-dot';
-    txt.textContent = 'Open a Mahakaleshwar booking page to autofill:';
-    btnGo.classList.add('hidden');
+    txt.textContent = `${MODE_LABELS[vault.bookingMode]} selected`;
+    btnGo.textContent = `Open ${MODE_LABELS[vault.bookingMode]} ↗`;
+    btnGo.classList.remove('hidden');
   }
-
-  // Highlight whichever page is currently open in the browser tab
-  quickGrid.querySelectorAll('.portal-jump-btn').forEach((btn) => {
-    btn.classList.toggle('current', btn.dataset.openMode === activeTabInfo.detectedMode);
-  });
 }
 
 function renderModeBar() {
   document.querySelectorAll('.mode-pill').forEach((btn) => {
     btn.classList.toggle('active', btn.dataset.mode === vault.bookingMode);
   });
-  const slotPanel = $('slotPanel');
-  if (slotPanel) {
-    slotPanel.classList.toggle('hidden', vault.bookingMode !== 'sheeghra_darshan');
-  }
   renderPortalLauncher();
+  renderServiceLiveInfo();
 }
 
 function getDefaultTomorrowIso() {
@@ -673,12 +750,6 @@ function bindEvents() {
 
   $('btnGoSelectedPage')?.addEventListener('click', () => {
     openPortalModePage(vault.bookingMode);
-  });
-
-  document.querySelectorAll('.portal-jump-btn').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      openPortalModePage(btn.dataset.openMode);
-    });
   });
 
   $('btnFillAll').addEventListener('click', runFullBookingFill);

@@ -26,11 +26,14 @@
         </div>
       </div>
 
-      <!-- Booking Mode Selector -->
-      <div class="mode-bar mode-bar-3" role="tablist" aria-label="Booking type">
+      <!-- Single Unified Service Selector (6 Official Mahakaleshwar Services) -->
+      <div class="mode-bar mode-bar-grid" role="tablist" aria-label="Booking type">
         <button class="mode-pill active" data-mode="sheeghra_darshan">⚡ Sheeghra</button>
-        <button class="mode-pill" data-mode="bhasma_aarti">🔱 Bhasma Aarti</button>
+        <button class="mode-pill" data-mode="bhasma_aarti">🔱 Tatkal Bhasma</button>
         <button class="mode-pill" data-mode="advance_bhasma_aarti">📅 Advance Bhasma</button>
+        <button class="mode-pill" data-mode="sandhya_aarti">🪔 Sandhya (12 PM)</button>
+        <button class="mode-pill" data-mode="shayan_aarti">🌙 Shayan (4 PM)</button>
+        <button class="mode-pill" data-mode="dharmshala">🏨 Dharmshala</button>
       </div>
     </header>
 
@@ -46,26 +49,16 @@
 
     <!-- TAB 1: DEVOTEES -->
     <section id="tab-devotees" class="tab-panel active">
-      <!-- Smart Page Context & 1-Click Portal Launcher -->
-      <div id="portalLauncher" class="portal-launcher">
-        <div id="portalPageStatus" class="portal-page-status">
+      <!-- Unified Live Service Status + Dynamic Availability Panel (Zero Duplicate Buttons!) -->
+      <div id="liveServicePanel" class="slot-panel">
+        <div class="portal-page-status">
           <span id="portalStatusDot" class="status-dot"></span>
-          <span id="portalStatusText">Choose which Mahakaleshwar page to open:</span>
-          <button type="button" id="btnGoSelectedPage" class="btn-go-page hidden">Open Page ↗</button>
+          <span id="portalStatusText">Sheeghra Darshan</span>
+          <button type="button" id="btnGoSelectedPage" class="btn-go-page">Open Page ↗</button>
         </div>
-        <div id="portalQuickGrid" class="portal-quick-grid">
-          <button type="button" class="portal-jump-btn" data-open-mode="sheeghra_darshan">⚡ Sheeghra ↗</button>
-          <button type="button" class="portal-jump-btn" data-open-mode="bhasma_aarti">🔱 Tatkal Bhasma ↗</button>
-          <button type="button" class="portal-jump-btn" data-open-mode="advance_bhasma_aarti">📅 Advance Bhasma ↗</button>
-          <button type="button" class="portal-jump-btn" data-open-mode="sandhya_aarti">🪔 Sandhya (12 PM) ↗</button>
-          <button type="button" class="portal-jump-btn" data-open-mode="shayan_aarti">🌙 Shayan (4 PM) ↗</button>
-          <button type="button" class="portal-jump-btn" data-open-mode="dharmshala">🏨 Dharmshala ↗</button>
-        </div>
-      </div>
 
-      <!-- Live Date, Persons & Available Slot Selector (Sheeghra Darshan) -->
-      <div id="slotPanel" class="slot-panel">
-        <div class="slot-row">
+        <!-- Shown when Sheeghra Darshan is selected -->
+        <div id="sheeghraSlotControls" class="slot-row">
           <div class="slot-field">
             <label for="sDate">Darshan Date</label>
             <input id="sDate" type="date" />
@@ -76,7 +69,16 @@
               <option value="">-- Click Refresh for live slots --</option>
             </select>
           </div>
-          <button type="button" id="btnFetchSlots" class="btn-slot-refresh" title="Fetch live available slots for this date">↻</button>
+          <button type="button" id="btnFetchSlots" class="btn-slot-refresh" title="Fetch live available slots">↻</button>
+        </div>
+
+        <!-- Shown for Tatkal Bhasma / Advance Bhasma / Sandhya / Shayan / Dharmshala -->
+        <div id="serviceLiveInfo" class="service-live-info hidden">
+          <div class="live-info-row">
+            <span id="serviceWindowBadge" class="window-badge">Checking...</span>
+            <span id="serviceReqSummary" class="req-summary"></span>
+          </div>
+          <div id="serviceScheduleText" class="live-schedule-text"></div>
         </div>
       </div>
 
