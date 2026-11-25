@@ -54,9 +54,12 @@
           <button type="button" id="btnGoSelectedPage" class="btn-go-page hidden">Open Page ↗</button>
         </div>
         <div id="portalQuickGrid" class="portal-quick-grid">
-          <button type="button" class="portal-jump-btn" data-open-mode="sheeghra_darshan">⚡ Sheeghra Darshan ↗</button>
-          <button type="button" class="portal-jump-btn" data-open-mode="bhasma_aarti">🔱 Tatkal Bhasma Aarti ↗</button>
+          <button type="button" class="portal-jump-btn" data-open-mode="sheeghra_darshan">⚡ Sheeghra ↗</button>
+          <button type="button" class="portal-jump-btn" data-open-mode="bhasma_aarti">🔱 Tatkal Bhasma ↗</button>
           <button type="button" class="portal-jump-btn" data-open-mode="advance_bhasma_aarti">📅 Advance Bhasma ↗</button>
+          <button type="button" class="portal-jump-btn" data-open-mode="sandhya_aarti">🪔 Sandhya (12 PM) ↗</button>
+          <button type="button" class="portal-jump-btn" data-open-mode="shayan_aarti">🌙 Shayan (4 PM) ↗</button>
+          <button type="button" class="portal-jump-btn" data-open-mode="dharmshala">🏨 Dharmshala ↗</button>
         </div>
       </div>
 
@@ -214,8 +217,11 @@
         <h3>🛕 Quick Official Portal Links</h3>
         <div class="quick-links">
           <a href="https://www.shrimahakaleshwar.mp.gov.in/services/slot-booking?type=sheeghra-darshan" target="_blank" rel="noopener">Sheeghra Darshan ↗</a>
-          <a href="https://www.shrimahakaleshwar.mp.gov.in/services/bhasmaarti" target="_blank" rel="noopener">Bhasma Aarti ↗</a>
+          <a href="https://www.shrimahakaleshwar.mp.gov.in/services/bhasmaarti" target="_blank" rel="noopener">Tatkal Bhasma Aarti ↗</a>
           <a href="https://www.shrimahakaleshwar.mp.gov.in/services/advance-bhasmaarti" target="_blank" rel="noopener">Advance Bhasma Aarti ↗</a>
+          <a href="https://www.shrimahakaleshwar.mp.gov.in/services/sandhya-aarti" target="_blank" rel="noopener">Sandhya Aarti ↗</a>
+          <a href="https://www.shrimahakaleshwar.mp.gov.in/services/shayan-aarti" target="_blank" rel="noopener">Shayan Aarti ↗</a>
+          <a href="https://www.shrimahakaleshwar.mp.gov.in/services/dharmshala-slot-booking" target="_blank" rel="noopener">Dharmshala Booking ↗</a>
         </div>
       </div>
     </section>
@@ -259,51 +265,39 @@
             </div>
           </div>
 
-          <div class="field">
-            <label for="dIdNumber">ID Proof Number *</label>
-            <input id="dIdNumber" type="text" required placeholder="12-digit Aadhaar or Passport No." />
+          <div class="field-row">
+            <div class="field">
+              <label for="dIdNumber">ID Proof Number *</label>
+              <input id="dIdNumber" type="text" required placeholder="12-digit Aadhaar / Passport No." />
+            </div>
+            <div class="field">
+              <label for="dRelation">Relation (Bhasma Aarti)</label>
+              <select id="dRelation">
+                <option value="Self">Self</option>
+                <option value="Wife">Wife</option>
+                <option value="Husband">Husband</option>
+                <option value="Father">Father</option>
+                <option value="Mother">Mother</option>
+                <option value="Son">Son</option>
+                <option value="Daughter">Daughter</option>
+                <option value="Brother">Brother</option>
+                <option value="Sister">Sister</option>
+                <option value="Friends">Friends</option>
+              </select>
+            </div>
           </div>
 
-          <details id="bhasmaExtras" class="extras-box">
-            <summary>Optional: Bhasma Aarti Extras (Relation &amp; Photo)</summary>
-            <div class="extras-body">
-              <div class="field">
-                <label for="dRelation">Relation</label>
-                <select id="dRelation">
-                  <option value="Self">Self</option>
-                  <option value="Wife">Wife</option>
-                  <option value="Husband">Husband</option>
-                  <option value="Father">Father</option>
-                  <option value="Mother">Mother</option>
-                  <option value="Son">Son</option>
-                  <option value="Daughter">Daughter</option>
-                  <option value="Brother">Brother</option>
-                  <option value="Sister">Sister</option>
-                  <option value="Friends">Friends</option>
-                </select>
-              </div>
-              <div class="field-row">
-                <div class="field">
-                  <label>Devotee Photo</label>
-                  <label class="upload-box" id="photoUploadLabel">
-                    <img id="photoThumb" class="upload-thumb hidden" alt="Photo preview" />
-                    <span id="photoPreviewText">📷 Upload Photo</span>
-                    <input id="dPhotoFile" type="file" accept="image/*" hidden />
-                  </label>
-                  <button type="button" id="btnClearPhoto" class="link-danger hidden">Remove photo</button>
-                </div>
-                <div class="field">
-                  <label>ID Proof Image</label>
-                  <label class="upload-box" id="idUploadLabel">
-                    <img id="idThumb" class="upload-thumb hidden" alt="ID scan preview" />
-                    <span id="idPreviewText">🪪 Upload ID Scan</span>
-                    <input id="dIdFile" type="file" accept="image/*" hidden />
-                  </label>
-                  <button type="button" id="btnClearIdFile" class="link-danger hidden">Remove ID scan</button>
-                </div>
-              </div>
+          <div class="field">
+            <label>Visitor Photo <span class="label-hint">(Required for Bhasma / Sandhya / Shayan Aarti · Not needed for Sheeghra)</span></label>
+            <div class="photo-inline-row">
+              <label class="upload-box upload-box-inline" id="photoUploadLabel">
+                <img id="photoThumb" class="upload-thumb hidden" alt="Photo preview" />
+                <span id="photoPreviewText">📷 Upload Visitor Photo (Auto-compressed JPEG)</span>
+                <input id="dPhotoFile" type="file" accept="image/*" hidden />
+              </label>
+              <button type="button" id="btnClearPhoto" class="link-danger hidden">Remove</button>
             </div>
-          </details>
+          </div>
 
           <div class="btn-row modal-actions">
             <button type="button" id="btnCancelModal" class="btn-ghost">Cancel</button>

@@ -537,6 +537,30 @@ body {
   color: var(--ok-text);
 }
 
+.mini-pill.warn-doc {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.label-hint {
+  font-weight: 500;
+  color: var(--muted);
+  font-size: 10px;
+}
+
+.photo-inline-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.upload-box-inline {
+  flex: 1;
+  flex-direction: row;
+  justify-content: flex-start;
+  padding: 7px 10px;
+}
+
 .devotee-actions {
   display: flex;
   align-items: center;

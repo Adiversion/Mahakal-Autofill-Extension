@@ -11,13 +11,21 @@ const PORTAL_URLS = {
   sheeghra_darshan: 'https://www.shrimahakaleshwar.mp.gov.in/services/slot-booking?type=sheeghra-darshan',
   bhasma_aarti: 'https://www.shrimahakaleshwar.mp.gov.in/services/bhasmaarti',
   advance_bhasma_aarti: 'https://www.shrimahakaleshwar.mp.gov.in/services/advance-bhasmaarti',
+  sandhya_aarti: 'https://www.shrimahakaleshwar.mp.gov.in/services/sandhya-aarti',
+  shayan_aarti: 'https://www.shrimahakaleshwar.mp.gov.in/services/shayan-aarti',
+  dharmshala: 'https://www.shrimahakaleshwar.mp.gov.in/services/dharmshala-slot-booking',
 };
 
 const MODE_LABELS = {
   sheeghra_darshan: 'Sheeghra Darshan',
   bhasma_aarti: 'Tatkal Bhasma Aarti',
   advance_bhasma_aarti: 'Advance Bhasma Aarti',
+  sandhya_aarti: 'Sandhya Aarti',
+  shayan_aarti: 'Shayan Aarti',
+  dharmshala: 'Dharmshala Booking',
 };
+
+const PHOTO_REQUIRED_MODES = new Set(['bhasma_aarti', 'advance_bhasma_aarti', 'sandhya_aarti', 'shayan_aarti']);
 
 // Optional remote ad/sponsor endpoint (gracefully falls back to built-in KasyHQ card)
 const REMOTE_AD_URL = 'https://kasyhq.com/api/mahakal-ad.json';
@@ -77,6 +85,15 @@ function detectPortalModeFromUrl(urlStr) {
     }
     if (full.includes('bhasmaarti') || full.includes('bhasm-aarti')) {
       return { onPortal: true, detectedMode: 'bhasma_aarti' };
+    }
+    if (full.includes('sandhya-aarti')) {
+      return { onPortal: true, detectedMode: 'sandhya_aarti' };
+    }
+    if (full.includes('shayan-aarti')) {
+      return { onPortal: true, detectedMode: 'shayan_aarti' };
+    }
+    if (full.includes('dharmshala')) {
+      return { onPortal: true, detectedMode: 'dharmshala' };
     }
     return { onPortal: true, detectedMode: null };
   } catch (_) {
@@ -378,14 +395,13 @@ function renderDevotees() {
     if (dev.photo?.dataUrl) {
       const pp = document.createElement('span');
       pp.className = 'mini-pill has-doc';
-      pp.textContent = '📷 Photo';
+      pp.textContent = '📷 Photo Ready';
       pills.appendChild(pp);
-    }
-    if (dev.idScan?.dataUrl) {
-      const ip = document.createElement('span');
-      ip.className = 'mini-pill has-doc';
-      ip.textContent = '🪪 ID Scan';
-      pills.appendChild(ip);
+    } else if (PHOTO_REQUIRED_MODES.has(vault.bookingMode)) {
+      const wp = document.createElement('span');
+      wp.className = 'mini-pill warn-doc';
+      wp.textContent = '⚠ Add Photo for Aarti';
+      pills.appendChild(wp);
     }
 
     meta.append(nameEl, subEl, pills);
@@ -466,11 +482,6 @@ function openDevoteeModal(dev = null) {
   draftIdScan = dev?.idScan || null;
   updateFileLabels();
 
-  const extras = $('bhasmaExtras');
-  if (extras) {
-    extras.open = Boolean(dev?.photo?.dataUrl || dev?.idScan?.dataUrl);
-  }
-
   $('devoteeModal').classList.remove('hidden');
   $('dName').focus();
 }
@@ -478,32 +489,20 @@ function openDevoteeModal(dev = null) {
 function closeDevoteeModal() {
   $('devoteeModal').classList.add('hidden');
   $('dPhotoFile').value = '';
-  $('dIdFile').value = '';
   draftPhoto = null;
   draftIdScan = null;
 }
 
 function updateFileLabels() {
   if (draftPhoto?.dataUrl) {
-    $('photoPreviewText').textContent = `✓ Photo (~${draftPhoto.approxKb || 30} KB)`;
+    $('photoPreviewText').textContent = `✓ Visitor Photo Ready (~${draftPhoto.approxKb || 30} KB)`;
     $('photoThumb').src = draftPhoto.dataUrl;
     $('photoThumb').classList.remove('hidden');
     $('btnClearPhoto').classList.remove('hidden');
   } else {
-    $('photoPreviewText').textContent = '📷 Upload Photo';
+    $('photoPreviewText').textContent = '📷 Upload Visitor Photo (Auto-compressed JPEG)';
     $('photoThumb').classList.add('hidden');
     $('btnClearPhoto').classList.add('hidden');
-  }
-
-  if (draftIdScan?.dataUrl) {
-    $('idPreviewText').textContent = `✓ ID Scan (~${draftIdScan.approxKb || 45} KB)`;
-    $('idThumb').src = draftIdScan.dataUrl;
-    $('idThumb').classList.remove('hidden');
-    $('btnClearIdFile').classList.remove('hidden');
-  } else {
-    $('idPreviewText').textContent = '🪪 Upload ID Scan';
-    $('idThumb').classList.add('hidden');
-    $('btnClearIdFile').classList.add('hidden');
   }
 }
 
@@ -527,8 +526,8 @@ async function runFullBookingFill() {
     showStatus('Select at least 1 devotee checkbox to set Number of Persons & fill.', 'info');
     return;
   }
-  const isBhasma = vault.bookingMode === 'bhasma_aarti' || vault.bookingMode === 'advance_bhasma_aarti';
-  const missingPhoto = isBhasma ? selected.filter((d) => !d.photo?.dataUrl) : [];
+  const needsPhoto = PHOTO_REQUIRED_MODES.has(vault.bookingMode);
+  const missingPhoto = needsPhoto ? selected.filter((d) => !d.photo?.dataUrl) : [];
 
   const preferredDate = $('sDate')?.value || vault.bookingPrefs?.preferredDate || '';
   const preferredSlot = $('sSlot')?.value || vault.bookingPrefs?.preferredSlot || '';
@@ -547,7 +546,7 @@ async function runFullBookingFill() {
     return;
   }
   const photoNote = missingPhoto.length > 0
-    ? ` (Note: Bhasma Aarti requires a Photo — upload in Edit → Optional Bhasma Extras for ${missingPhoto.map((d) => d.name).join(', ')})`
+    ? ` (⚠ Add Visitor Photo in Edit for: ${missingPhoto.map((d) => d.name).join(', ')})`
     : '';
   showStatus((res.summary || `Filled ${res.filledCount || 0} field(s).`) + photoNote, 'ok');
 }
@@ -632,6 +631,7 @@ function bindEvents() {
       vault.bookingMode = btn.dataset.mode;
       vault = await saveVault(vault);
       renderModeBar();
+      renderDevotees();
       if (vault.bookingMode === 'sheeghra_darshan' && $('sDate')?.value) {
         fetchLiveSheeghraSlots($('sDate').value, true);
       }
@@ -699,26 +699,9 @@ function bindEvents() {
     }
   });
 
-  $('dIdFile').addEventListener('change', async (e) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    try {
-      draftIdScan = await compressImageFile(file, 720, 0.76);
-      updateFileLabels();
-    } catch (err) {
-      showStatus(err.message, 'err');
-    }
-  });
-
   $('btnClearPhoto').addEventListener('click', () => {
     draftPhoto = null;
     $('dPhotoFile').value = '';
-    updateFileLabels();
-  });
-
-  $('btnClearIdFile').addEventListener('click', () => {
-    draftIdScan = null;
-    $('dIdFile').value = '';
     updateFileLabels();
   });
 

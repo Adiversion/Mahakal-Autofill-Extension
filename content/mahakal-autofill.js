@@ -697,12 +697,23 @@
     }
 
     if (!targetEl) return false;
-    const ok = await setControlValue(targetEl, String(count), 'persons');
+    // Dynamically clamp to the portal <select>'s real max option (e.g. 5 on Tatkal/Sandhya/Shayan, 6 on Sheeghra)
+    let effectiveCount = count;
+    if (targetEl.tagName === 'SELECT') {
+      const numericOpts = Array.from(targetEl.options)
+        .map((o) => parseInt(o.text.trim(), 10))
+        .filter((n) => !isNaN(n) && n > 0);
+      if (numericOpts.length > 0) {
+        const portalMax = Math.max(...numericOpts);
+        effectiveCount = Math.min(effectiveCount, portalMax);
+      }
+    }
+    const ok = await setControlValue(targetEl, String(effectiveCount), 'persons');
     if (ok) {
       // Allow Angular 19 change detection + generateVisitorsRows() / addPilgrim() to render visitor rows
       await sleep(360);
     }
-    return ok;
+    return ok ? effectiveCount : false;
   }
 
   /**
@@ -872,7 +883,7 @@
           filledCount += contactFilled;
 
           const preParts = [];
-          if (personsSet) preParts.push(`Persons=${personCount}`);
+          if (personsSet) preParts.push(`Persons=${typeof personsSet === 'number' ? personsSet : personCount}`);
           if (selectedSlot) preParts.push(`Slot ${selectedSlot}`);
 
           if (filledCount === 0 && preParts.length === 0) {
