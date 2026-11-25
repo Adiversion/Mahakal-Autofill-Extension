@@ -27,6 +27,10 @@ const MODE_LABELS = {
 
 const PHOTO_REQUIRED_MODES = new Set(['bhasma_aarti', 'advance_bhasma_aarti', 'sandhya_aarti', 'shayan_aarti']);
 
+function getMaxPersonsForMode(mode) {
+  return mode === 'sheeghra_darshan' || mode === 'dharmshala' ? 6 : 5;
+}
+
 // Optional remote ad/sponsor endpoint (gracefully falls back to built-in KasyHQ card)
 const REMOTE_AD_URL = 'https://kasyhq.com/api/mahakal-ad.json';
 
@@ -154,7 +158,8 @@ function initialsOf(name) {
 
 function getSelectedDevotees() {
   const selectedSet = new Set(vault.selectedIds || []);
-  return vault.devotees.filter((d) => selectedSet.has(d.id));
+  const maxAllowed = getMaxPersonsForMode(vault.bookingMode);
+  return vault.devotees.filter((d) => selectedSet.has(d.id)).slice(0, maxAllowed);
 }
 
 function detectPortalModeFromUrl(urlStr) {
@@ -398,10 +403,12 @@ function renderDevotees() {
   const devotees = vault.devotees || [];
   const selectedSet = new Set(vault.selectedIds || []);
 
+  const maxAllowed = getMaxPersonsForMode(vault.bookingMode);
   $('devoteeCountBadge').textContent = String(devotees.length);
   $('selectedCountLabel').textContent = String(
-    devotees.filter((d) => selectedSet.has(d.id)).length
+    Math.min(maxAllowed, devotees.filter((d) => selectedSet.has(d.id)).length)
   );
+  if ($('maxPersonsLabel')) $('maxPersonsLabel').textContent = String(maxAllowed);
 
   listEl.innerHTML = '';
   if (devotees.length === 0) {
@@ -422,10 +429,11 @@ function renderDevotees() {
     chk.title = 'Include in Fill Booking Form';
     chk.addEventListener('change', async () => {
       const set = new Set(vault.selectedIds || []);
+      const maxAllowed = getMaxPersonsForMode(vault.bookingMode);
       if (chk.checked) {
-        if (set.size >= MAX_PERSONS_PER_BOOKING) {
+        if (set.size >= maxAllowed) {
           chk.checked = false;
-          showStatus(`Mahakaleshwar portal allows max ${MAX_PERSONS_PER_BOOKING} persons per booking. Uncheck another devotee to swap.`, 'info');
+          showStatus(`${MODE_LABELS[vault.bookingMode]} allows max ${maxAllowed} persons per booking. Uncheck another devotee to swap.`, 'info');
           return;
         }
         set.add(dev.id);
@@ -706,6 +714,10 @@ function bindEvents() {
   document.querySelectorAll('.mode-pill').forEach((btn) => {
     btn.addEventListener('click', async () => {
       vault.bookingMode = btn.dataset.mode;
+      const maxAllowed = getMaxPersonsForMode(vault.bookingMode);
+      if ((vault.selectedIds || []).length > maxAllowed) {
+        vault.selectedIds = vault.selectedIds.slice(0, maxAllowed);
+      }
       vault = await saveVault(vault);
       renderModeBar();
       renderDevotees();
