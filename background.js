@@ -4,11 +4,14 @@ import { loadVault, saveVault } from './lib/vault.js';
 const PORTAL_HOST_PATTERN = /(^|\.)(shrimahakaleshwar\.mp\.gov\.in|mponline\.gov\.in|mahakaleshwar\.mp\.gov\.in)$/i;
 const WATCHER_KEY = 'mahakalAutoWatcherV1';
 const pendingReloadTimers = new Map();
+const tabLoadSeq = new Map();
+const autoFilledLoadKeys = new Map();
+const autoFilledBanners = new Map();
 
 const TIMED_WINDOWS = {
-  bhasma_aarti: { openHour: 8, openMinute: 0, closeHour: 24, closeMinute: 0 },
-  sandhya_aarti: { openHour: 12, openMinute: 0, closeHour: 18, closeMinute: 30 },
-  shayan_aarti: { openHour: 16, openMinute: 0, closeHour: 22, closeMinute: 0 },
+  bhasma_aarti: { openHour: 8, openMinute: 0, openSecond: 0, closeHour: 24, closeMinute: 0 },
+  sandhya_aarti: { openHour: 12, openMinute: 0, openSecond: 0, closeHour: 18, closeMinute: 30 },
+  shayan_aarti: { openHour: 16, openMinute: 0, openSecond: 0, closeHour: 22, closeMinute: 0 },
 };
 
 function getWindowStateIst(mode) {
@@ -30,18 +33,23 @@ function detectPortalServiceFromUrl(urlStr) {
     if (!PORTAL_HOST_PATTERN.test(u.hostname)) return null;
     const full = (u.pathname + u.search).toLowerCase();
     if (full.includes('sheeghra-darshan') || full.includes('shighra-darshan')) return 'sheeghra_darshan';
-    if (full.includes('bhasmaarti') && !full.includes('advance-bhasmaarti')) return 'bhasma_aarti';
+    if (full.includes('advance-bhasmaarti') || full.includes('bhasmaarti-request')) return 'advance_bhasma_aarti';
+    if (full.includes('bhasmaarti') || full.includes('bhasm-aarti')) return 'bhasma_aarti';
     if (full.includes('sandhya-aarti')) return 'sandhya_aarti';
     if (full.includes('shayan-aarti')) return 'shayan_aarti';
+    if (full.includes('dharmshala')) return 'dharmshala';
     return null;
   } catch (_) {
     return null;
   }
 }
 
-function isReloadableBookingRoute(urlStr) {
-  const mode = detectPortalServiceFromUrl(urlStr);
+function isTimedService(mode) {
   return mode === 'bhasma_aarti' || mode === 'sandhya_aarti' || mode === 'shayan_aarti';
+}
+
+function isReloadableBookingRoute(urlStr) {
+  return isTimedService(detectPortalServiceFromUrl(urlStr));
 }
 
 function isWidgetSupportedRoute(urlStr) {
@@ -51,8 +59,10 @@ function isWidgetSupportedRoute(urlStr) {
 const MODE_LABELS = {
   sheeghra_darshan: 'Sheeghra Darshan',
   bhasma_aarti: 'Tatkal Bhasma Aarti',
+  advance_bhasma_aarti: 'Advance Bhasma Aarti',
   sandhya_aarti: 'Sandhya Aarti',
   shayan_aarti: 'Shayan Aarti',
+  dharmshala: 'Dharmshala Booking',
 };
 
 async function runFillFromVault(tabId, { mode = 'bhasma_aarti', batchIndex = null, autoContinue = false } = {}) {
@@ -90,13 +100,17 @@ async function runFillFromVault(tabId, { mode = 'bhasma_aarti', batchIndex = nul
 function getWatcher() {
   return new Promise((resolve) => {
     chrome.storage.local.get([WATCHER_KEY], (res) => {
-      resolve(res?.[WATCHER_KEY] || {
+      const raw = res?.[WATCHER_KEY] || {};
+      const legacyCombined = Boolean(raw.autoFillAndContinue);
+      resolve({
         armed: false,
         tabId: null,
         mode: 'bhasma_aarti',
         autoReload: false,
-        autoFillAndContinue: false,
         retryMs: 2000,
+        ...raw,
+        autoFill: typeof raw.autoFill === 'boolean' ? raw.autoFill : legacyCombined,
+        autoContinue: typeof raw.autoContinue === 'boolean' ? raw.autoContinue : legacyCombined,
       });
     });
   });
@@ -242,7 +256,8 @@ async function injectTimerWidget(tabId, cfg) {
       closeHour: Number(cfg.closeHour ?? 24),
       closeMinute: Number(cfg.closeMinute ?? 0),
       autoReload: Boolean(cfg.autoReload),
-      autoFillAndContinue: Boolean(cfg.autoFillAndContinue),
+      autoFill: Boolean(cfg.autoFill ?? cfg.autoFillAndContinue),
+      autoContinue: Boolean(cfg.autoContinue ?? cfg.autoFillAndContinue),
       statusBanner: String(cfg.statusBanner || ''),
       retrying: Boolean(cfg.retrying),
       totalDevotees,
@@ -261,7 +276,10 @@ async function injectTimerWidget(tabId, cfg) {
         if (existing) existing.remove();
         return;
       }
-      if (!cfg.forceShow && window.__mahakalWidgetDismissed) {
+      if (cfg.forceShow || (window.__mahakalWidgetDismissedMode && window.__mahakalWidgetDismissedMode !== cfg.mode)) {
+        window.__mahakalWidgetDismissedMode = null;
+      }
+      if (!cfg.forceShow && window.__mahakalWidgetDismissedMode === cfg.mode) {
         return;
       }
 
@@ -340,10 +358,16 @@ async function injectTimerWidget(tabId, cfg) {
             <input id="mkTimerAutoReload" type="checkbox" ${cfg.autoReload ? 'checked' : ''} style="accent-color:#f59e0b;cursor:pointer;" />
             <span>Auto-reload (Open Time &amp; Quota Full)</span>
           </label>
-          <label style="display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:600;color:#fef3c7;cursor:pointer;">
-            <input id="mkTimerAutoContinue" type="checkbox" ${cfg.autoFillAndContinue ? 'checked' : ''} style="accent-color:#10b981;cursor:pointer;" />
-            <span>Auto-Fill &amp; Click Continue</span>
-          </label>
+          <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+            <label style="display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:600;color:#fef3c7;cursor:pointer;" title="Auto-fill form automatically when it opens">
+              <input id="mkTimerAutoFill" type="checkbox" ${cfg.autoFill ? 'checked' : ''} style="accent-color:#10b981;cursor:pointer;" />
+              <span>Auto-Fill</span>
+            </label>
+            <label style="display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:600;color:#fef3c7;cursor:pointer;" title="Click Continue automatically after filling &amp; photo upload">
+              <input id="mkTimerAutoContinue" type="checkbox" ${cfg.autoContinue ? 'checked' : ''} style="accent-color:#f59e0b;cursor:pointer;" />
+              <span>Auto-Continue</span>
+            </label>
+          </div>
         </div>
         <div style="display:flex;align-items:center;justify-content:flex-end;gap:6px;flex-wrap:wrap;">
           <button id="mkTimerStopBtn" type="button" style="background:#7f1d1d;color:#fecaca;border:1px solid #ef4444;border-radius:7px;padding:5px 9px;font-size:11px;font-weight:700;cursor:pointer;display:${cfg.retrying ? 'inline-block' : 'none'};">■ Stop</button>
@@ -357,6 +381,7 @@ async function injectTimerWidget(tabId, cfg) {
       const valEl = widget.querySelector('#mkTimerValue');
       const subEl = widget.querySelector('#mkTimerSub');
       const chkReload = widget.querySelector('#mkTimerAutoReload');
+      const chkAutoFill = widget.querySelector('#mkTimerAutoFill');
       const chkContinue = widget.querySelector('#mkTimerAutoContinue');
       const stopBtn = widget.querySelector('#mkTimerStopBtn');
       const reloadBtn = widget.querySelector('#mkTimerReloadBtn');
@@ -365,14 +390,16 @@ async function injectTimerWidget(tabId, cfg) {
 
       let activeBatchIdx = cfg.initialBatch >= 0 ? cfg.initialBatch : null;
       const updateFillBtnText = () => {
+        const suffix = chkContinue.checked ? ' + Continue' : '';
         if (activeBatchIdx === null) {
-          fillBtn.textContent = `⚡ Auto Fill${fillCountLabel}`;
+          fillBtn.textContent = `⚡ Auto Fill${fillCountLabel}${suffix}`;
         } else {
           const start = activeBatchIdx * cfg.maxAllowed + 1;
           const end = Math.min(cfg.totalDevotees, (activeBatchIdx + 1) * cfg.maxAllowed);
-          fillBtn.textContent = `⚡ Auto Fill (${end - start + 1})`;
+          fillBtn.textContent = `⚡ Auto Fill (${end - start + 1})${suffix}`;
         }
       };
+      updateFillBtnText();
 
       widget.querySelectorAll('.mk-batch-btn').forEach((btn) => {
         btn.addEventListener('click', () => {
@@ -398,13 +425,18 @@ async function injectTimerWidget(tabId, cfg) {
           armed,
           mode: cfg.mode,
           autoReload: chkReload.checked,
-          autoFillAndContinue: chkContinue.checked,
+          autoFill: chkAutoFill.checked,
+          autoContinue: chkContinue.checked,
           skipImmediate: true,
         }, () => { void chrome.runtime.lastError; });
       };
 
       chkReload.addEventListener('change', () => pushWatcherUpdate(chkReload.checked));
-      chkContinue.addEventListener('change', () => pushWatcherUpdate(chkReload.checked));
+      chkAutoFill.addEventListener('change', () => pushWatcherUpdate(chkReload.checked));
+      chkContinue.addEventListener('change', () => {
+        updateFillBtnText();
+        pushWatcherUpdate(chkReload.checked);
+      });
       stopBtn.addEventListener('click', () => {
         chkReload.checked = false;
         pushWatcherUpdate(false);
@@ -444,7 +476,7 @@ async function injectTimerWidget(tabId, cfg) {
       });
 
       closeBtn.addEventListener('click', () => {
-        window.__mahakalWidgetDismissed = true;
+        window.__mahakalWidgetDismissedMode = cfg.mode;
         if (window.__mahakalTimerInterval) clearInterval(window.__mahakalTimerInterval);
         pushWatcherUpdate(false);
         widget.remove();
@@ -516,8 +548,9 @@ async function evaluateAndHandleArmedTab(tabId) {
   }
 
   const routeMode = detectPortalServiceFromUrl(url) || watcher.mode || 'bhasma_aarti';
-  const isTimed = routeMode !== 'sheeghra_darshan';
+  const isTimed = isTimedService(routeMode);
   const isArmedHere = Boolean(watcher.armed && watcher.tabId === tabId);
+  const currentLoadKey = `${url}#${tabLoadSeq.get(tabId) || 0}`;
 
   // Wait up to ~2.4s for Angular loader to settle after reload/navigation
   let status = await inspectTabLiveStatus(tabId);
@@ -528,17 +561,35 @@ async function evaluateAndHandleArmedTab(tabId) {
 
   const latest = await getWatcher();
   const stillArmed = Boolean(isArmedHere && latest.armed && latest.tabId === tabId);
+  const alreadyFilledThisLoad = autoFilledLoadKeys.get(tabId) === currentLoadKey;
+  const shouldAutoFillNow = Boolean(latest.autoFill && !alreadyFilledThisLoad);
 
   if (!isTimed) {
     if (stillArmed) await setWatcher({ armed: false });
+    let banner = alreadyFilledThisLoad
+      ? (autoFilledBanners.get(tabId) || `✅ Auto-Filled!`)
+      : (status?.hasForm
+        ? `● ${MODE_LABELS[routeMode] || 'Form'} Ready — Click ⚡ Auto Fill!`
+        : `● Pick Date / Slot → ⚡ Auto Fill`);
+    if (status?.hasForm && shouldAutoFillNow) {
+      autoFilledLoadKeys.set(tabId, currentLoadKey);
+      const fillRes = await runFillFromVault(tabId, { mode: routeMode, autoContinue: Boolean(latest.autoContinue) });
+      if (fillRes?.ok) {
+        banner = fillRes.continueClicked
+          ? `✅ Filled ${fillRes.filledDevotees || ''} & Clicked Continue!`
+          : `✅ Auto-Filled ${fillRes.filledDevotees || 0} devotee(s)! Click Continue.`;
+        autoFilledBanners.set(tabId, banner);
+      }
+    }
     await injectTimerWidget(tabId, {
       enabled: true,
       isTimed: false,
       hasForm: Boolean(status?.hasForm),
       mode: routeMode,
       autoReload: false,
-      autoFillAndContinue: latest.autoFillAndContinue,
-      statusBanner: status?.hasForm ? '● Sheeghra Form Ready — Click ⚡ Auto Fill!' : '● Pick Date on Calendar → ⚡ Auto Fill',
+      autoFill: latest.autoFill,
+      autoContinue: latest.autoContinue,
+      statusBanner: banner,
       retrying: false,
     });
     return;
@@ -548,13 +599,17 @@ async function evaluateAndHandleArmedTab(tabId) {
 
   if (status?.hasForm && !status?.quotaFullAlert) {
     if (stillArmed) await setWatcher({ armed: false });
-    let banner = '● Form Open — Click ⚡ Auto Fill!';
-    if (stillArmed && latest.autoFillAndContinue) {
-      const fillRes = await runFillFromVault(tabId, { mode: routeMode, autoContinue: true });
+    let banner = alreadyFilledThisLoad
+      ? (autoFilledBanners.get(tabId) || '✅ Auto-Filled!')
+      : '● Form Open — Click ⚡ Auto Fill!';
+    if (shouldAutoFillNow) {
+      autoFilledLoadKeys.set(tabId, currentLoadKey);
+      const fillRes = await runFillFromVault(tabId, { mode: routeMode, autoContinue: Boolean(latest.autoContinue) });
       if (fillRes?.ok) {
         banner = fillRes.continueClicked
           ? `✅ Filled ${fillRes.filledDevotees || ''} & Clicked Continue!`
-          : `✅ Filled ${fillRes.filledDevotees || 0} devotee(s)!`;
+          : `✅ Auto-Filled ${fillRes.filledDevotees || 0} devotee(s)! Click Continue.`;
+        autoFilledBanners.set(tabId, banner);
       }
     }
     await injectTimerWidget(tabId, {
@@ -566,7 +621,8 @@ async function evaluateAndHandleArmedTab(tabId) {
       closeHour: win.closeHour,
       closeMinute: win.closeMinute,
       autoReload: false,
-      autoFillAndContinue: latest.autoFillAndContinue,
+      autoFill: latest.autoFill,
+      autoContinue: latest.autoContinue,
       statusBanner: banner,
       retrying: false,
     });
@@ -582,7 +638,8 @@ async function evaluateAndHandleArmedTab(tabId) {
       closeHour: win.closeHour,
       closeMinute: win.closeMinute,
       autoReload: false,
-      autoFillAndContinue: latest.autoFillAndContinue,
+      autoFill: latest.autoFill,
+      autoContinue: latest.autoContinue,
       statusBanner: status?.quotaFullAlert ? '✕ Quota full on page — check Auto-reload' : '',
       retrying: false,
     });
@@ -599,7 +656,8 @@ async function evaluateAndHandleArmedTab(tabId) {
       closeHour: win.closeHour,
       closeMinute: win.closeMinute,
       autoReload: false,
-      autoFillAndContinue: latest.autoFillAndContinue,
+      autoFill: latest.autoFill,
+      autoContinue: latest.autoContinue,
       statusBanner: '✕ Date restricted on portal',
       retrying: false,
     });
@@ -620,7 +678,8 @@ async function evaluateAndHandleArmedTab(tabId) {
       closeHour: win.closeHour,
       closeMinute: win.closeMinute,
       autoReload: true,
-      autoFillAndContinue: latest.autoFillAndContinue,
+      autoFill: latest.autoFill,
+      autoContinue: latest.autoContinue,
       statusBanner: banner,
       retrying: true,
     });
@@ -648,13 +707,18 @@ async function evaluateAndHandleArmedTab(tabId) {
       closeHour: win.closeHour,
       closeMinute: win.closeMinute,
       autoReload: latest.autoReload,
-      autoFillAndContinue: latest.autoFillAndContinue,
+      autoFill: latest.autoFill,
+      autoContinue: latest.autoContinue,
     });
   }
 }
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+  if (changeInfo.status === 'loading') {
+    tabLoadSeq.set(tabId, (tabLoadSeq.get(tabId) || 0) + 1);
+  }
   if (changeInfo.url) {
+    tabLoadSeq.set(tabId, (tabLoadSeq.get(tabId) || 0) + 1);
     if (!isReloadableBookingRoute(changeInfo.url)) {
       clearPendingReload(tabId);
       getWatcher().then((w) => {
@@ -663,6 +727,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
     }
     if (isWidgetSupportedRoute(changeInfo.url)) {
       setTimeout(() => evaluateAndHandleArmedTab(tabId).catch(() => {}), 320);
+      setTimeout(() => evaluateAndHandleArmedTab(tabId).catch(() => {}), 1100);
     } else {
       injectTimerWidget(tabId, { enabled: false }).catch(() => {});
     }
@@ -675,6 +740,9 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
 
 chrome.tabs.onRemoved.addListener(async (tabId) => {
   clearPendingReload(tabId);
+  tabLoadSeq.delete(tabId);
+  autoFilledLoadKeys.delete(tabId);
+  autoFilledBanners.delete(tabId);
   const watcher = await getWatcher();
   if (watcher.tabId === tabId) {
     await setWatcher({ armed: false, tabId: null });
@@ -930,6 +998,73 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
+  if (msg.type === 'FETCH_DHARMASHALA_AVAILABILITY') {
+    (async () => {
+      const checkIn = String(msg.checkIn || '').trim();
+      const checkOut = String(msg.checkOut || '').trim();
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(checkIn) || !/^\d{4}-\d{2}-\d{2}$/.test(checkOut)) {
+        return sendResponse({ ok: false, error: 'Please select valid Check-in and Check-out dates.' });
+      }
+      const noOfDays = Math.max(1, Math.round((Date.parse(checkOut) - Date.parse(checkIn)) / 86400000));
+      const base = 'https://prod-api.mahakal.brainabove.net/public/api/v1';
+
+      const fetchPublicJson = async (url) => {
+        try {
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), 8000);
+          const res = await fetch(url, { signal: controller.signal, cache: 'no-store' });
+          clearTimeout(timer);
+          if (res.ok) return await res.json();
+        } catch (_) {}
+        try {
+          const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+          if (tab?.id && /shrimahakaleshwar\.mp\.gov\.in/i.test(tab.url || '')) {
+            const exec = await chrome.scripting.executeScript({
+              target: { tabId: tab.id },
+              args: [url],
+              func: async (u) => {
+                const r = await fetch(u, { cache: 'no-store' });
+                return r.ok ? await r.json() : null;
+              },
+            });
+            return exec?.[0]?.result || null;
+          }
+        } catch (_) {}
+        return null;
+      };
+
+      const listJson = await fetchPublicJson(`${base}/dharmashala_list`);
+      const dharmshalas = Array.isArray(listJson?.data) ? listJson.data : [];
+      if (dharmshalas.length === 0) {
+        return sendResponse({ ok: false, error: 'Could not reach Dharmshala list endpoint.' });
+      }
+
+      const results = await Promise.all(
+        dharmshalas.slice(0, 8).map(async (dh) => {
+          const roomJson = await fetchPublicJson(
+            `${base}/available_rooms?dharmshala_id=${encodeURIComponent(dh.id)}&from_date=${encodeURIComponent(checkIn)}&to_date=${encodeURIComponent(checkOut)}&no_of_days=${noOfDays}`
+          );
+          const rooms = Array.isArray(roomJson?.data) ? roomJson.data : [];
+          const bookable = rooms.filter((r) => r.is_booking_available && Number(r.max_available_rooms || 0) > 0);
+          const minCharge = bookable.length > 0
+            ? Math.min(...bookable.map((r) => Number(r.charges || 0)).filter((n) => n > 0))
+            : null;
+          return {
+            id: dh.id,
+            name: dh.dharmshala_name || dh.name || `Dharmshala #${dh.id}`,
+            rooms,
+            bookableCount: bookable.length,
+            totalRoomsAvailable: bookable.reduce((s, r) => s + Number(r.max_available_rooms || 0), 0),
+            minCharge: Number.isFinite(minCharge) ? minCharge : null,
+          };
+        })
+      );
+
+      return sendResponse({ ok: true, checkIn, checkOut, noOfDays, results });
+    })();
+    return true;
+  }
+
   if (msg.type === 'RELOAD_ACTIVE_PORTAL_TAB') {
     (async () => {
       try {
@@ -964,7 +1099,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           tabId,
           mode: msg.mode || 'bhasma_aarti',
           autoReload: Boolean(msg.autoReload),
-          autoFillAndContinue: Boolean(msg.autoFillAndContinue),
+          autoFill: Boolean(msg.autoFill ?? msg.autoFillAndContinue),
+          autoContinue: Boolean(msg.autoContinue ?? msg.autoFillAndContinue),
         });
         if (!msg.skipImmediate && next.armed && tabId) {
           evaluateAndHandleArmedTab(tabId).catch(() => {});
@@ -1035,7 +1171,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           closeHour: msg.closeHour ?? 24,
           closeMinute: msg.closeMinute ?? 0,
           autoReload: Boolean(msg.autoReload),
-          autoFillAndContinue: Boolean(msg.autoFillAndContinue),
+          autoFill: Boolean(msg.autoFill ?? msg.autoFillAndContinue),
+          autoContinue: Boolean(msg.autoContinue ?? msg.autoFillAndContinue),
           statusBanner: msg.statusBanner || '',
           retrying: Boolean(msg.retrying),
         });

@@ -26,6 +26,7 @@
   ],
   "host_permissions": [
     "https://www.shrimahakaleshwar.mp.gov.in/*",
+    "https://shrimahakaleshwar.mp.gov.in/*",
     "https://prod-api.mahakal.brainabove.net/*"
   ],
   "background": {

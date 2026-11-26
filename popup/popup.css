@@ -368,7 +368,13 @@ body {
 }
 
 .slot-field input[type="date"] {
-  width: 128px;
+  width: 118px;
+}
+
+.dharmshala-box {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
 }
 
 .btn-slot-refresh {

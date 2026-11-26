@@ -73,6 +73,28 @@
           <button type="button" id="btnFetchSlots" class="btn-slot-refresh" title="Fetch live available slots">↻</button>
         </div>
 
+        <!-- Dharmshala Offline Room Availability Controls -->
+        <div id="dharmshalaRoomControls" class="dharmshala-box hidden">
+          <div class="slot-row">
+            <div class="slot-field">
+              <label for="dCheckIn">Check-in</label>
+              <input id="dCheckIn" type="date" />
+            </div>
+            <div class="slot-field">
+              <label for="dCheckOut">Check-out</label>
+              <input id="dCheckOut" type="date" />
+            </div>
+            <div class="slot-field slot-grow">
+              <label for="dProperty">Dharmshala <span id="roomMeta" class="slot-meta"></span></label>
+              <select id="dProperty">
+                <option value="">-- Click ↻ to check --</option>
+              </select>
+            </div>
+            <button type="button" id="btnFetchRooms" class="btn-slot-refresh" title="Check live Dharmshala rooms offline">↻</button>
+          </div>
+          <div id="dharmshalaRoomsSummary" class="live-schedule-text"></div>
+        </div>
+
         <!-- Timed / Live Info Block (Tatkal, Advance, Sandhya, Shayan, Dharmshala) -->
         <div id="serviceLiveInfo" class="service-live-info hidden">
           <div id="serviceCountdownBar" class="countdown-bar hidden">
@@ -91,15 +113,19 @@
           </div>
         </div>
 
-        <!-- Automation Toggles (Available on Sheeghra + Timed Aartis) -->
+        <!-- Automation Toggles (Independent Auto-Reload, Auto-Fill, Auto-Continue) -->
         <div id="automationControls" class="automation-row hidden">
           <label id="lblAutoReload" class="toggle-chip hidden" title="Auto-reload at opening time and retry every 2s while Quota Full">
             <input id="chkAutoReload" type="checkbox" />
-            <span id="txtAutoReload">Auto-reload (Open &amp; Quota)</span>
+            <span id="txtAutoReload">Auto-reload (2s)</span>
           </label>
-          <label id="lblAutoContinue" class="toggle-chip hidden" title="Automatically fill selected devotees and click Continue">
+          <label id="lblAutoFill" class="toggle-chip" title="Automatically fill selected devotees as soon as form opens">
+            <input id="chkAutoFill" type="checkbox" />
+            <span id="txtAutoFill">Auto-Fill</span>
+          </label>
+          <label id="lblAutoContinue" class="toggle-chip" title="Automatically click Continue after autofill & photo upload">
             <input id="chkAutoContinue" type="checkbox" />
-            <span id="txtAutoContinue">Auto-Fill &amp; Continue</span>
+            <span id="txtAutoContinue">Auto-Continue</span>
           </label>
         </div>
 

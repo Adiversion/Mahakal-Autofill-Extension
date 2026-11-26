@@ -41,9 +41,11 @@ let lastInspectJson = '';
 let activeTabInfo = { id: null, url: '', detectedMode: null, onPortal: false };
 let cachedRestrictedDates = null;
 let cachedAdvanceBhasma = null;
+let cachedDharmshalaAvailability = null;
 let lastLivePageStatus = null;
 let countdownTimerId = null;
 let autoReloadEnabled = false;
+let autoFillEnabled = false;
 let autoContinueEnabled = false;
 let autoReloadTriggeredForTarget = '';
 
@@ -127,10 +129,13 @@ function stopServiceCountdown() {
 function syncOnPageTimerWidget(enabled, mode, extra = {}) {
   const win = TIMED_OPENING_WINDOWS[mode];
   const isTimed = Boolean(win);
+  const supported = Boolean(
+    isTimed || mode === 'sheeghra_darshan' || mode === 'advance_bhasma_aarti' || mode === 'dharmshala'
+  );
   chrome.runtime.sendMessage(
     {
       type: 'SYNC_PAGE_TIMER',
-      enabled: Boolean(enabled && (isTimed || mode === 'sheeghra_darshan')),
+      enabled: Boolean(enabled && supported),
       isTimed,
       hasForm: Boolean(extra.hasForm ?? (lastLivePageStatus?.mode === mode && lastLivePageStatus?.hasForm)),
       mode,
@@ -141,7 +146,8 @@ function syncOnPageTimerWidget(enabled, mode, extra = {}) {
       closeHour: win?.closeHour ?? 24,
       closeMinute: win?.closeMinute ?? 0,
       autoReload: isTimed ? autoReloadEnabled : false,
-      autoFillAndContinue: autoContinueEnabled,
+      autoFill: autoFillEnabled,
+      autoContinue: autoContinueEnabled,
       statusBanner: extra.statusBanner || '',
       retrying: Boolean(extra.retrying),
     },
@@ -159,7 +165,8 @@ function syncBackgroundWatcher(armed, mode, skipImmediate = false) {
       tabId: activeTabInfo.id,
       mode,
       autoReload: autoReloadEnabled,
-      autoFillAndContinue: autoContinueEnabled,
+      autoFill: autoFillEnabled,
+      autoContinue: autoContinueEnabled,
       skipImmediate,
     },
     () => {
@@ -168,23 +175,31 @@ function syncBackgroundWatcher(armed, mode, skipImmediate = false) {
   );
 }
 
+function syncAutomationCheckboxes({ isTimed = false } = {}) {
+  const autoControls = $('automationControls');
+  const autoWrap = $('lblAutoReload');
+  const chkAuto = $('chkAutoReload');
+  const fillWrap = $('lblAutoFill');
+  const chkFill = $('chkAutoFill');
+  const continueWrap = $('lblAutoContinue');
+  const chkContinue = $('chkAutoContinue');
+  if (autoControls) autoControls.classList.remove('hidden');
+  if (autoWrap) autoWrap.classList.toggle('hidden', !isTimed);
+  if (chkAuto) chkAuto.checked = autoReloadEnabled;
+  if (fillWrap) fillWrap.classList.remove('hidden');
+  if (chkFill) chkFill.checked = autoFillEnabled;
+  if (continueWrap) continueWrap.classList.remove('hidden');
+  if (chkContinue) chkContinue.checked = autoContinueEnabled;
+}
+
 function startServiceCountdown(mode, isMatched, liveStatus) {
   stopServiceCountdown();
   const win = TIMED_OPENING_WINDOWS[mode];
   const bar = $('serviceCountdownBar');
-  const autoControls = $('automationControls');
   const reloadBtn = $('btnReloadPortalTab');
-  const autoWrap = $('lblAutoReload');
-  const chkAuto = $('chkAutoReload');
-  const continueWrap = $('lblAutoContinue');
-  const chkContinue = $('chkAutoContinue');
   if (!win || !bar) return;
 
-  if (autoControls) autoControls.classList.toggle('hidden', !isMatched);
-  if (autoWrap) autoWrap.classList.toggle('hidden', !isMatched);
-  if (continueWrap) continueWrap.classList.toggle('hidden', !isMatched);
-  if (chkAuto) chkAuto.checked = autoReloadEnabled;
-  if (chkContinue) chkContinue.checked = autoContinueEnabled;
+  syncAutomationCheckboxes({ isTimed: Boolean(isMatched) });
 
   // Keep on-page widget available with Auto Fill even when form is open
   if (isMatched && liveStatus?.hasForm) {
@@ -353,33 +368,46 @@ async function fetchRestrictedDatesCached() {
 async function renderServiceLiveInfo(forceRefresh = false) {
   const infoBox = $('serviceLiveInfo');
   const sheeghraBox = $('sheeghraSlotControls');
+  const dharmshalaBox = $('dharmshalaRoomControls');
   const refreshBtn = $('btnRefreshServiceInfo');
   const badge = $('serviceWindowBadge');
-  const autoControls = $('automationControls');
-  const autoWrap = $('lblAutoReload');
-  const continueWrap = $('lblAutoContinue');
-  const chkContinue = $('chkAutoContinue');
   if (!infoBox || !sheeghraBox || !badge) return;
 
   const mode = vault.bookingMode;
   const isSheeghra = mode === 'sheeghra_darshan';
+  const isDharmshala = mode === 'dharmshala';
   const isMatched = activeTabInfo.onPortal && activeTabInfo.detectedMode === mode;
 
   sheeghraBox.classList.toggle('hidden', !isSheeghra);
-  infoBox.classList.toggle('hidden', isSheeghra);
+  if (dharmshalaBox) dharmshalaBox.classList.toggle('hidden', !isDharmshala);
+  infoBox.classList.toggle('hidden', isSheeghra || isDharmshala);
+
   if (isSheeghra) {
     stopServiceCountdown();
     if (refreshBtn) refreshBtn.classList.add('hidden');
     badge.className = 'window-badge open';
     badge.textContent = vault.lang === 'hi' ? '● 16-दिन विंडो' : '● 16-Day Rolling Window';
-    if (autoControls) autoControls.classList.toggle('hidden', !isMatched);
-    if (autoWrap) autoWrap.classList.add('hidden');
-    if (continueWrap) continueWrap.classList.toggle('hidden', !isMatched);
-    if (chkContinue) chkContinue.checked = autoContinueEnabled;
+    syncAutomationCheckboxes({ isTimed: false });
     if (isMatched) {
       syncOnPageTimerWidget(true, 'sheeghra_darshan', {
-        hasForm: true,
+        hasForm: Boolean(lastLivePageStatus?.hasForm),
         statusBanner: '● Sheeghra Form Ready — Click Auto Fill!',
+      });
+    }
+    renderReadinessLine();
+    return;
+  }
+
+  if (isDharmshala) {
+    stopServiceCountdown();
+    if (refreshBtn) refreshBtn.classList.add('hidden');
+    syncAutomationCheckboxes({ isTimed: false });
+    renderDharmshalaPrefs();
+    fetchDharmshalaRoomsAvailability(forceRefresh);
+    if (isMatched) {
+      syncOnPageTimerWidget(true, 'dharmshala', {
+        hasForm: Boolean(lastLivePageStatus?.hasForm),
+        statusBanner: '● Dharmshala Booking — Click Auto Fill!',
       });
     }
     renderReadinessLine();
@@ -394,7 +422,12 @@ async function renderServiceLiveInfo(forceRefresh = false) {
 
   if (mode === 'advance_bhasma_aarti') {
     stopServiceCountdown();
-    if (autoControls) autoControls.classList.add('hidden');
+    syncAutomationCheckboxes({ isTimed: false });
+    if (isMatched) {
+      syncOnPageTimerWidget(true, 'advance_bhasma_aarti', {
+        hasForm: Boolean(lastLivePageStatus?.hasForm),
+      });
+    }
     badge.className = 'window-badge';
     badge.textContent = 'Checking live dates...';
     reqEl.textContent = 'Needs: Name, Photo, Relation, ID';
@@ -502,11 +535,6 @@ async function renderServiceLiveInfo(forceRefresh = false) {
     badge.className = 'window-badge';
     badge.textContent = isOpen ? '⏰ Window Active (4:00 – 10:00 PM IST)' : '⏰ Opens Daily 4:00 PM – 10:00 PM IST';
     schedEl.textContent = `Same-day Shayan Aarti (${ist.ddmmyyyy}). Open page to verify live quota availability${blockedNote}.`;
-  } else if (mode === 'dharmshala') {
-    if (autoControls) autoControls.classList.add('hidden');
-    badge.className = 'window-badge open';
-    badge.textContent = '● Live Room Availability on Portal';
-    schedEl.textContent = `Pick check-in/out dates on Dharmshala page, then click Fill to populate visitors & address.`;
   }
   renderReadinessLine();
 }
@@ -606,10 +634,13 @@ async function openPortalModePage(mode) {
     chrome.tabs.update(activeTabInfo.id, { url: targetUrl });
     activeTabInfo.detectedMode = mode;
     activeTabInfo.url = targetUrl;
+    lastLivePageStatus = null;
     renderPortalLauncher();
-    showStatus(`Opening ${MODE_LABELS[mode]} in current tab...`, 'info');
+    renderServiceLiveInfo(false);
+    showStatus(`Switched tab to ${MODE_LABELS[mode]}...`, 'info');
   } else {
     chrome.tabs.create({ url: targetUrl });
+    showStatus(`Opening ${MODE_LABELS[mode]} in new tab...`, 'info');
   }
 }
 
@@ -733,11 +764,130 @@ async function fetchLiveSheeghraSlots(isoDate, silent = false) {
 
   if (!matchedSaved && selectEl.options.length > 0) {
     vault.bookingPrefs = {
+      ...(vault.bookingPrefs || {}),
       preferredDate: isoDate,
       preferredSlot: selectEl.value,
     };
     vault = await saveVault(vault);
   }
+}
+
+function addDaysIso(isoStr, days) {
+  const base = Date.parse(`${isoStr}T00:00:00Z`);
+  if (!Number.isFinite(base)) return getDefaultTomorrowIso();
+  return new Date(base + days * 86400000).toISOString().slice(0, 10);
+}
+
+function renderDharmshalaPrefs() {
+  const inEl = $('dCheckIn');
+  const outEl = $('dCheckOut');
+  if (!inEl || !outEl) return;
+  const minIn = getDefaultTomorrowIso();
+  const maxDate = addDaysIso(getIstParts().iso, 31);
+  inEl.min = minIn;
+  inEl.max = maxDate;
+
+  let checkIn = vault.bookingPrefs?.dCheckIn || minIn;
+  if (checkIn < minIn || checkIn > maxDate) checkIn = minIn;
+  inEl.value = checkIn;
+
+  const minOut = addDaysIso(checkIn, 1);
+  outEl.min = minOut;
+  outEl.max = addDaysIso(minIn, 32);
+  let checkOut = vault.bookingPrefs?.dCheckOut || minOut;
+  if (checkOut <= checkIn) checkOut = minOut;
+  outEl.value = checkOut;
+}
+
+function renderSelectedDharmshalaSummary() {
+  const selectEl = $('dProperty');
+  const sumEl = $('dharmshalaRoomsSummary');
+  if (!selectEl || !sumEl || !cachedDharmshalaAvailability?.ok) return;
+  const chosen = cachedDharmshalaAvailability.results.find((d) => String(d.id) === String(selectEl.value));
+  if (!chosen) return;
+  const bookable = (chosen.rooms || []).filter((r) => r.is_booking_available && Number(r.max_available_rooms || 0) > 0);
+  if (bookable.length === 0) {
+    sumEl.textContent = `${chosen.name}: No rooms open for ${cachedDharmshalaAvailability.checkIn} → ${cachedDharmshalaAvailability.checkOut} (${cachedDharmshalaAvailability.noOfDays}d).`;
+    return;
+  }
+  const preview = bookable
+    .slice(0, 3)
+    .map((r) => `${r.room_type}: ${r.max_available_rooms} avail (₹${r.charges})`)
+    .join(' · ');
+  const more = bookable.length > 3 ? ` +${bookable.length - 3} more` : '';
+  sumEl.textContent = `${preview}${more}`;
+}
+
+async function fetchDharmshalaRoomsAvailability(forceRefresh = false) {
+  const inEl = $('dCheckIn');
+  const outEl = $('dCheckOut');
+  const selectEl = $('dProperty');
+  const metaEl = $('roomMeta');
+  const sumEl = $('dharmshalaRoomsSummary');
+  const badge = $('serviceWindowBadge');
+  if (!inEl || !outEl || !selectEl || !sumEl) return;
+
+  const checkIn = inEl.value || getDefaultTomorrowIso();
+  const checkOut = outEl.value && outEl.value > checkIn ? outEl.value : addDaysIso(checkIn, 1);
+  const cacheKey = `${checkIn}|${checkOut}`;
+
+  if (forceRefresh || !cachedDharmshalaAvailability || cachedDharmshalaAvailability.cacheKey !== cacheKey) {
+    metaEl.textContent = 'checking...';
+    selectEl.innerHTML = '<option value="">Checking live rooms...</option>';
+    sumEl.textContent = `Checking live Dharmshala rooms offline (${checkIn} → ${checkOut})...`;
+    if (badge) {
+      badge.className = 'window-badge';
+      badge.textContent = 'Checking rooms...';
+    }
+
+    const res = await new Promise((resolve) => {
+      chrome.runtime.sendMessage({ type: 'FETCH_DHARMASHALA_AVAILABILITY', checkIn, checkOut }, (r) => {
+        if (chrome.runtime.lastError) return resolve({ ok: false, error: chrome.runtime.lastError.message });
+        resolve(r || { ok: false, error: 'No response' });
+      });
+    });
+
+    if (vault.bookingMode !== 'dharmshala') return;
+    if (!res.ok) {
+      metaEl.textContent = 'offline';
+      selectEl.innerHTML = '<option value="">-- Open Dharmshala page or retry --</option>';
+      sumEl.textContent = res.error || 'Could not fetch live rooms. Click ↻ to retry.';
+      if (badge) {
+        badge.className = 'window-badge';
+        badge.textContent = '● Offline Room Check';
+      }
+      return;
+    }
+    cachedDharmshalaAvailability = { ...res, cacheKey };
+  }
+
+  const results = cachedDharmshalaAvailability.results || [];
+  const totalOpenRooms = results.reduce((s, d) => s + d.totalRoomsAvailable, 0);
+  const openProps = results.filter((d) => d.totalRoomsAvailable > 0).length;
+  metaEl.textContent = `${totalOpenRooms} rooms`;
+
+  if (badge) {
+    badge.className = totalOpenRooms > 0 ? 'window-badge open' : 'window-badge closed';
+    badge.textContent = totalOpenRooms > 0
+      ? `● ${totalOpenRooms} Open Room(s) (${openProps}/${results.length})`
+      : `✕ 0 Rooms Open (${checkIn})`;
+  }
+
+  const savedId = String(vault.bookingPrefs?.dPropertyId || '');
+  selectEl.innerHTML = '';
+  for (const dh of results) {
+    const opt = document.createElement('option');
+    opt.value = String(dh.id);
+    const rate = dh.minCharge ? ` · ₹${dh.minCharge}+` : '';
+    opt.textContent = `${dh.name} (${dh.totalRoomsAvailable} avail${rate})`;
+    if (savedId && savedId === String(dh.id)) opt.selected = true;
+    selectEl.appendChild(opt);
+  }
+  if (!savedId) {
+    const firstOpen = results.find((d) => d.totalRoomsAvailable > 0);
+    if (firstOpen) selectEl.value = String(firstOpen.id);
+  }
+  renderSelectedDharmshalaSummary();
 }
 
 const I18N = {
@@ -748,6 +898,7 @@ const I18N = {
     switchPortal: 'Switch Tab ↗',
     portalOk: 'Portal ✓',
     autoReload: 'Auto-reload (2s)',
+    autoFill: 'Auto-Fill',
     autoContinue: 'Auto-Continue',
     fillBtn: 'Fill Form',
     fillAndContinueBtn: 'Fill & Continue',
@@ -758,8 +909,8 @@ const I18N = {
     tabTools: 'Tools & Backup',
     emptySelect: 'Select devotees below before filling.',
     missingPhoto: (n) => `${n} selected devotee(s) missing photo — required for Aarti.`,
-    readyFree: (n, ac) => `Ready: ${n} selected · Free (₹0) · ${ac ? 'Auto-Continue ON' : 'Pauses at Continue / OTP'}`,
-    readyDefault: (n, ac) => `Ready: ${n} selected · ${ac ? 'Auto-Continue ON (pauses OTP/Payment)' : 'Pauses at Continue, OTP & Payment'}`,
+    readyFree: (n, af, ac) => `Ready: ${n} · Free (₹0) · ${af ? 'Auto-Fill ON' : 'Manual Fill'}${ac ? ' + Continue' : ' (manual Continue)'}`,
+    readyDefault: (n, af, ac) => `Ready: ${n} · ${af ? 'Auto-Fill ON' : 'Manual Fill'} · ${ac ? 'Auto-Continue ON' : 'Manual Continue'}`,
   },
   hi: {
     brandSub: 'सुरक्षित लोकल वॉल्ट · त्वरित दर्शन व आरती',
@@ -768,6 +919,7 @@ const I18N = {
     switchPortal: 'पेज बदलें ↗',
     portalOk: 'पोर्टल ✓',
     autoReload: 'ऑटो-रीलोड (2s)',
+    autoFill: 'ऑटो-फ़िल',
     autoContinue: 'ऑटो-कंटिन्यू',
     fillBtn: 'फॉर्म भरें',
     fillAndContinueBtn: 'भरें व Continue',
@@ -778,8 +930,8 @@ const I18N = {
     tabTools: 'टूल्स व बैकअप',
     emptySelect: 'फॉर्म भरने से पहले नीचे से भक्त चुनें।',
     missingPhoto: (n) => `चयनित ${n} भक्तों की फ़ोटो नहीं है — आरती के लिए आवश्यक।`,
-    readyFree: (n, ac) => `तैयार: ${n} चयनित · निःशुल्क (₹0) · ${ac ? 'ऑटो-कंटिन्यू चालू' : 'Continue/OTP पर रुकेगा'}`,
-    readyDefault: (n, ac) => `तैयार: ${n} चयनित · ${ac ? 'ऑटो-कंटिन्यू चालू (OTP/पेमेंट पर रुकेगा)' : 'Continue, OTP व पेमेंट पर रुकेगा'}`,
+    readyFree: (n, af, ac) => `तैयार: ${n} · निःशुल्क (₹0) · ${af ? 'ऑटो-फ़िल चालू' : 'मैन्युअल फ़िल'}${ac ? ' + Continue' : ' (मैन्युअल Continue)'}`,
+    readyDefault: (n, af, ac) => `तैयार: ${n} · ${af ? 'ऑटो-फ़िल चालू' : 'मैन्युअल फ़िल'} · ${ac ? 'ऑटो-कंटिन्यू चालू' : 'मैन्युअल Continue'}`,
   },
 };
 
@@ -800,8 +952,8 @@ function renderReadinessLine() {
   } else {
     el.className = 'readiness-line ready';
     el.textContent = vault.bookingMode === 'bhasma_aarti'
-      ? t.readyFree(selected.length, autoContinueEnabled)
-      : t.readyDefault(selected.length, autoContinueEnabled);
+      ? t.readyFree(selected.length, autoFillEnabled, autoContinueEnabled)
+      : t.readyDefault(selected.length, autoFillEnabled, autoContinueEnabled);
   }
 }
 
@@ -813,6 +965,7 @@ function applyLanguage() {
   $('btnAddDevotee').textContent = t.addBtn;
   $('btnFillMobile').textContent = t.otpMob;
   if ($('txtAutoReload')) $('txtAutoReload').textContent = t.autoReload;
+  if ($('txtAutoFill')) $('txtAutoFill').textContent = t.autoFill;
   if ($('txtAutoContinue')) $('txtAutoContinue').textContent = t.autoContinue;
   const tabBtns = document.querySelectorAll('.tab-btn');
   if (tabBtns[0]) {
@@ -1205,18 +1358,24 @@ function bindEvents() {
     });
   });
 
-  // Booking mode
+  // Booking mode — direct open/switch on portal when clicked
   document.querySelectorAll('.mode-pill').forEach((btn) => {
     btn.addEventListener('click', async () => {
-      vault.bookingMode = btn.dataset.mode;
-      const maxAllowed = getMaxPersonsForMode(vault.bookingMode);
+      const targetMode = btn.dataset.mode;
+      const alreadyMatched = activeTabInfo.onPortal && activeTabInfo.detectedMode === targetMode;
+      vault.bookingMode = targetMode;
+      const maxAllowed = getMaxPersonsForMode(targetMode);
       if ((vault.selectedIds || []).length > maxAllowed) {
         vault.selectedIds = vault.selectedIds.slice(0, maxAllowed);
       }
       vault = await saveVault(vault);
-      renderModeBar();
       renderDevotees();
-      if (vault.bookingMode === 'sheeghra_darshan' && $('sDate')?.value) {
+      if (!alreadyMatched) {
+        await openPortalModePage(targetMode);
+      } else {
+        renderModeBar();
+      }
+      if (targetMode === 'sheeghra_darshan' && $('sDate')?.value) {
         fetchLiveSheeghraSlots($('sDate').value, true);
       }
     });
@@ -1243,6 +1402,42 @@ function bindEvents() {
     const d = $('sDate')?.value || getDefaultTomorrowIso();
     $('sDate').value = d;
     fetchLiveSheeghraSlots(d, false);
+  });
+
+  // Dharmshala Offline Room Availability controls
+  $('dCheckIn')?.addEventListener('change', async () => {
+    const inDate = $('dCheckIn').value || getDefaultTomorrowIso();
+    let outDate = $('dCheckOut')?.value || '';
+    if (!outDate || outDate <= inDate) {
+      outDate = addDaysIso(inDate, 1);
+      if ($('dCheckOut')) $('dCheckOut').value = outDate;
+    }
+    if ($('dCheckOut')) $('dCheckOut').min = addDaysIso(inDate, 1);
+    vault.bookingPrefs = { ...(vault.bookingPrefs || {}), dCheckIn: inDate, dCheckOut: outDate };
+    vault = await saveVault(vault);
+    fetchDharmshalaRoomsAvailability(true);
+  });
+
+  $('dCheckOut')?.addEventListener('change', async () => {
+    const inDate = $('dCheckIn')?.value || getDefaultTomorrowIso();
+    let outDate = $('dCheckOut').value;
+    if (!outDate || outDate <= inDate) {
+      outDate = addDaysIso(inDate, 1);
+      $('dCheckOut').value = outDate;
+    }
+    vault.bookingPrefs = { ...(vault.bookingPrefs || {}), dCheckIn: inDate, dCheckOut: outDate };
+    vault = await saveVault(vault);
+    fetchDharmshalaRoomsAvailability(true);
+  });
+
+  $('dProperty')?.addEventListener('change', async () => {
+    vault.bookingPrefs = { ...(vault.bookingPrefs || {}), dPropertyId: $('dProperty').value };
+    vault = await saveVault(vault);
+    renderSelectedDharmshalaSummary();
+  });
+
+  $('btnFetchRooms')?.addEventListener('click', () => {
+    fetchDharmshalaRoomsAvailability(true);
   });
 
   $('btnRefreshServiceInfo')?.addEventListener('click', () => {
@@ -1278,6 +1473,25 @@ function bindEvents() {
     );
   });
 
+  $('chkAutoFill')?.addEventListener('change', (e) => {
+    autoFillEnabled = Boolean(e.target.checked);
+    try {
+      localStorage.setItem('mahakalAutoFill', autoFillEnabled ? '1' : '0');
+    } catch (_) {}
+    applyLanguage();
+    const isMatched = activeTabInfo.onPortal && activeTabInfo.detectedMode === vault.bookingMode;
+    syncBackgroundWatcher(autoReloadEnabled && isMatched, vault.bookingMode, true);
+    if (isMatched) {
+      syncOnPageTimerWidget(true, vault.bookingMode);
+    }
+    showStatus(
+      autoFillEnabled
+        ? 'Auto-Fill enabled: fills form automatically when opened (without clicking Continue unless Auto-Continue is checked).'
+        : 'Auto-Fill disabled (click ⚡ Auto Fill manually).',
+      'info'
+    );
+  });
+
   $('chkAutoContinue')?.addEventListener('change', (e) => {
     autoContinueEnabled = Boolean(e.target.checked);
     try {
@@ -1285,14 +1499,14 @@ function bindEvents() {
     } catch (_) {}
     applyLanguage();
     const isMatched = activeTabInfo.onPortal && activeTabInfo.detectedMode === vault.bookingMode;
+    syncBackgroundWatcher(autoReloadEnabled && isMatched, vault.bookingMode, true);
     if (isMatched) {
-      syncBackgroundWatcher(autoReloadEnabled, vault.bookingMode, true);
       syncOnPageTimerWidget(true, vault.bookingMode);
     }
     showStatus(
       autoContinueEnabled
-        ? 'Auto-Fill & Continue enabled: fills devotees when form opens, waits for photo upload, and clicks Continue.'
-        : 'Auto-Continue disabled (manual Continue).',
+        ? 'Auto-Continue enabled: clicks Continue automatically after fill & photo upload.'
+        : 'Auto-Continue disabled (stops after filling so you click Continue manually).',
       'info'
     );
   });
@@ -1483,6 +1697,7 @@ function bindEvents() {
 (async function init() {
   try {
     autoReloadEnabled = localStorage.getItem('mahakalAutoReload') === '1';
+    autoFillEnabled = localStorage.getItem('mahakalAutoFill') === '1';
     autoContinueEnabled = localStorage.getItem('mahakalAutoContinue') === '1';
   } catch (_) {}
   try {
@@ -1494,7 +1709,8 @@ function bindEvents() {
     });
     if (wRes?.ok && wRes.watcher) {
       if (typeof wRes.watcher.autoReload === 'boolean') autoReloadEnabled = wRes.watcher.autoReload;
-      if (typeof wRes.watcher.autoFillAndContinue === 'boolean') autoContinueEnabled = wRes.watcher.autoFillAndContinue;
+      if (typeof wRes.watcher.autoFill === 'boolean') autoFillEnabled = wRes.watcher.autoFill;
+      if (typeof wRes.watcher.autoContinue === 'boolean') autoContinueEnabled = wRes.watcher.autoContinue;
     }
   } catch (_) {}
   vault = await loadVault();
