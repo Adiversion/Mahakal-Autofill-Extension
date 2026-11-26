@@ -61,8 +61,12 @@
         <!-- Sheeghra Date & Slot Controls -->
         <div id="sheeghraSlotControls" class="slot-row">
           <div class="slot-field">
-            <label for="sDate">Darshan Date</label>
-            <input id="sDate" type="date" />
+            <label for="sDateDisplay">Darshan Date</label>
+            <div class="date-ddmm-wrap">
+              <input id="sDateDisplay" type="text" placeholder="dd-mm-yyyy" maxlength="10" inputmode="numeric" />
+              <input id="sDate" type="date" class="sr-date-picker" tabindex="-1" aria-hidden="true" />
+              <button type="button" id="btnPickSDate" class="btn-cal-pick" title="Pick date from calendar" aria-label="Pick Darshan date">📅</button>
+            </div>
           </div>
           <div class="slot-field slot-grow">
             <label for="sSlot">Slot <span id="slotMeta" class="slot-meta"></span></label>
@@ -77,12 +81,20 @@
         <div id="dharmshalaRoomControls" class="dharmshala-box hidden">
           <div class="slot-row">
             <div class="slot-field">
-              <label for="dCheckIn">Check-in</label>
-              <input id="dCheckIn" type="date" />
+              <label for="dCheckInDisplay">Check-in</label>
+              <div class="date-ddmm-wrap">
+                <input id="dCheckInDisplay" type="text" placeholder="dd-mm-yyyy" maxlength="10" inputmode="numeric" />
+                <input id="dCheckIn" type="date" class="sr-date-picker" tabindex="-1" aria-hidden="true" />
+                <button type="button" id="btnPickCheckIn" class="btn-cal-pick" title="Pick check-in date" aria-label="Pick Check-in date">📅</button>
+              </div>
             </div>
             <div class="slot-field">
-              <label for="dCheckOut">Check-out</label>
-              <input id="dCheckOut" type="date" />
+              <label for="dCheckOutDisplay">Check-out</label>
+              <div class="date-ddmm-wrap">
+                <input id="dCheckOutDisplay" type="text" placeholder="dd-mm-yyyy" maxlength="10" inputmode="numeric" />
+                <input id="dCheckOut" type="date" class="sr-date-picker" tabindex="-1" aria-hidden="true" />
+                <button type="button" id="btnPickCheckOut" class="btn-cal-pick" title="Pick check-out date" aria-label="Pick Check-out date">📅</button>
+              </div>
             </div>
             <div class="slot-field slot-grow">
               <label for="dProperty">Dharmshala <span id="roomMeta" class="slot-meta"></span></label>

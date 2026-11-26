@@ -296,15 +296,84 @@ async function readLivePageStatus(forceRefresh = false) {
   return lastLivePageStatus;
 }
 
+function formatDdMmYyyy(isoStr) {
+  const s = String(isoStr || '').trim();
+  const isoMatch = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (isoMatch) return `${isoMatch[3]}-${isoMatch[2]}-${isoMatch[1]}`;
+  return s;
+}
+
+function parseDdMmYyyyToIso(str) {
+  const s = String(str || '').trim();
+  const ddmm = s.match(/^(\d{2})[-/](\d{2})[-/](\d{4})$/);
+  if (ddmm) {
+    const d = Number(ddmm[1]);
+    const m = Number(ddmm[2]);
+    const y = Number(ddmm[3]);
+    const dt = new Date(Date.UTC(y, m - 1, d));
+    if (dt.getUTCFullYear() === y && dt.getUTCMonth() === m - 1 && dt.getUTCDate() === d) {
+      return `${String(y).padStart(4, '0')}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+    }
+    return null;
+  }
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  return null;
+}
+
+function setDualDateValue(pickerId, displayId, isoValue) {
+  const picker = $(pickerId);
+  const display = $(displayId);
+  if (picker && isoValue) picker.value = isoValue;
+  if (display && isoValue) display.value = formatDdMmYyyy(isoValue);
+}
+
+function bindDualDateInput(pickerId, displayId, btnId) {
+  const picker = $(pickerId);
+  const display = $(displayId);
+  const btn = $(btnId);
+  if (!picker || !display) return;
+
+  btn?.addEventListener('click', () => {
+    if (typeof picker.showPicker === 'function') {
+      try {
+        picker.showPicker();
+        return;
+      } catch (_) {}
+    }
+    picker.focus();
+  });
+
+  picker.addEventListener('change', () => {
+    if (picker.value) display.value = formatDdMmYyyy(picker.value);
+  });
+
+  const commitText = () => {
+    const parsedIso = parseDdMmYyyyToIso(display.value);
+    if (!parsedIso || (picker.min && parsedIso < picker.min) || (picker.max && parsedIso > picker.max)) {
+      if (picker.value) display.value = formatDdMmYyyy(picker.value);
+      return;
+    }
+    if (picker.value !== parsedIso) {
+      picker.value = parsedIso;
+      display.value = formatDdMmYyyy(parsedIso);
+      picker.dispatchEvent(new Event('change'));
+    } else {
+      display.value = formatDdMmYyyy(parsedIso);
+    }
+  };
+
+  display.addEventListener('blur', commitText);
+  display.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      commitText();
+    }
+  });
+}
+
 function formatCompactDates(isoList) {
   if (!isoList || isoList.length === 0) return '';
-  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-  return isoList
-    .map((s) => {
-      const m = String(s).match(/^(\d{4})-(\d{2})-(\d{2})/);
-      return m ? `${Number(m[3])} ${months[Number(m[2]) - 1]}` : s;
-    })
-    .join(', ');
+  return isoList.map((s) => formatDdMmYyyy(String(s).slice(0, 10))).join(', ');
 }
 
 function getMonthRange(year, monthIndex0) {
@@ -514,7 +583,7 @@ async function renderServiceLiveInfo(forceRefresh = false) {
       return true;
     })
     .slice(0, 3)
-    .map((r) => String(r.date).slice(0, 10));
+    .map((r) => formatDdMmYyyy(String(r.date).slice(0, 10)));
 
   const blockedNote = upcomingBlocked.length > 0
     ? ` · Restricted dates: ${upcomingBlocked.join(', ')}`
@@ -705,7 +774,7 @@ function renderSlotPrefs() {
   if (!prefDate || prefDate < todayIso || prefDate > maxIso) {
     prefDate = getDefaultTomorrowIso();
   }
-  dateEl.value = prefDate;
+  setDualDateValue('sDate', 'sDateDisplay', prefDate);
 }
 
 async function fetchLiveSheeghraSlots(isoDate, silent = false) {
@@ -743,7 +812,7 @@ async function fetchLiveSheeghraSlots(isoDate, silent = false) {
     opt.value = '';
     opt.textContent = 'No active slots open on this date';
     selectEl.appendChild(opt);
-    if (!silent) showStatus(`No active Sheeghra Darshan slots open on ${isoDate}. Try another date.`, 'info');
+    if (!silent) showStatus(`No active Sheeghra Darshan slots open on ${formatDdMmYyyy(isoDate)}. Try another date.`, 'info');
     return;
   }
 
@@ -789,14 +858,14 @@ function renderDharmshalaPrefs() {
 
   let checkIn = vault.bookingPrefs?.dCheckIn || minIn;
   if (checkIn < minIn || checkIn > maxDate) checkIn = minIn;
-  inEl.value = checkIn;
+  setDualDateValue('dCheckIn', 'dCheckInDisplay', checkIn);
 
   const minOut = addDaysIso(checkIn, 1);
   outEl.min = minOut;
   outEl.max = addDaysIso(minIn, 32);
   let checkOut = vault.bookingPrefs?.dCheckOut || minOut;
   if (checkOut <= checkIn) checkOut = minOut;
-  outEl.value = checkOut;
+  setDualDateValue('dCheckOut', 'dCheckOutDisplay', checkOut);
 }
 
 function renderSelectedDharmshalaSummary() {
@@ -807,7 +876,7 @@ function renderSelectedDharmshalaSummary() {
   if (!chosen) return;
   const bookable = (chosen.rooms || []).filter((r) => r.is_booking_available && Number(r.max_available_rooms || 0) > 0);
   if (bookable.length === 0) {
-    sumEl.textContent = `${chosen.name}: No rooms open for ${cachedDharmshalaAvailability.checkIn} → ${cachedDharmshalaAvailability.checkOut} (${cachedDharmshalaAvailability.noOfDays}d).`;
+    sumEl.textContent = `${chosen.name}: No rooms open for ${formatDdMmYyyy(cachedDharmshalaAvailability.checkIn)} → ${formatDdMmYyyy(cachedDharmshalaAvailability.checkOut)} (${cachedDharmshalaAvailability.noOfDays}d).`;
     return;
   }
   const preview = bookable
@@ -834,7 +903,7 @@ async function fetchDharmshalaRoomsAvailability(forceRefresh = false) {
   if (forceRefresh || !cachedDharmshalaAvailability || cachedDharmshalaAvailability.cacheKey !== cacheKey) {
     metaEl.textContent = 'checking...';
     selectEl.innerHTML = '<option value="">Checking live rooms...</option>';
-    sumEl.textContent = `Checking live Dharmshala rooms offline (${checkIn} → ${checkOut})...`;
+    sumEl.textContent = `Checking live Dharmshala rooms offline (${formatDdMmYyyy(checkIn)} → ${formatDdMmYyyy(checkOut)})...`;
     if (badge) {
       badge.className = 'window-badge';
       badge.textContent = 'Checking rooms...';
@@ -870,7 +939,7 @@ async function fetchDharmshalaRoomsAvailability(forceRefresh = false) {
     badge.className = totalOpenRooms > 0 ? 'window-badge open' : 'window-badge closed';
     badge.textContent = totalOpenRooms > 0
       ? `● ${totalOpenRooms} Open Room(s) (${openProps}/${results.length})`
-      : `✕ 0 Rooms Open (${checkIn})`;
+      : `✕ 0 Rooms Open (${formatDdMmYyyy(checkIn)})`;
   }
 
   const savedId = String(vault.bookingPrefs?.dPropertyId || '');
@@ -1382,8 +1451,13 @@ function bindEvents() {
   });
 
   // Live Date & Slot selectors
+  bindDualDateInput('sDate', 'sDateDisplay', 'btnPickSDate');
+  bindDualDateInput('dCheckIn', 'dCheckInDisplay', 'btnPickCheckIn');
+  bindDualDateInput('dCheckOut', 'dCheckOutDisplay', 'btnPickCheckOut');
+
   $('sDate')?.addEventListener('change', async () => {
     const newDate = $('sDate').value;
+    setDualDateValue('sDate', 'sDateDisplay', newDate);
     vault.bookingPrefs = { ...(vault.bookingPrefs || {}), preferredDate: newDate };
     vault = await saveVault(vault);
     if (newDate) fetchLiveSheeghraSlots(newDate, false);
@@ -1400,17 +1474,18 @@ function bindEvents() {
 
   $('btnFetchSlots')?.addEventListener('click', () => {
     const d = $('sDate')?.value || getDefaultTomorrowIso();
-    $('sDate').value = d;
+    setDualDateValue('sDate', 'sDateDisplay', d);
     fetchLiveSheeghraSlots(d, false);
   });
 
   // Dharmshala Offline Room Availability controls
   $('dCheckIn')?.addEventListener('change', async () => {
     const inDate = $('dCheckIn').value || getDefaultTomorrowIso();
+    setDualDateValue('dCheckIn', 'dCheckInDisplay', inDate);
     let outDate = $('dCheckOut')?.value || '';
     if (!outDate || outDate <= inDate) {
       outDate = addDaysIso(inDate, 1);
-      if ($('dCheckOut')) $('dCheckOut').value = outDate;
+      setDualDateValue('dCheckOut', 'dCheckOutDisplay', outDate);
     }
     if ($('dCheckOut')) $('dCheckOut').min = addDaysIso(inDate, 1);
     vault.bookingPrefs = { ...(vault.bookingPrefs || {}), dCheckIn: inDate, dCheckOut: outDate };
@@ -1423,8 +1498,8 @@ function bindEvents() {
     let outDate = $('dCheckOut').value;
     if (!outDate || outDate <= inDate) {
       outDate = addDaysIso(inDate, 1);
-      $('dCheckOut').value = outDate;
     }
+    setDualDateValue('dCheckOut', 'dCheckOutDisplay', outDate);
     vault.bookingPrefs = { ...(vault.bookingPrefs || {}), dCheckIn: inDate, dCheckOut: outDate };
     vault = await saveVault(vault);
     fetchDharmshalaRoomsAvailability(true);
@@ -1660,7 +1735,7 @@ function bindEvents() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `mahakal-devotees-backup-${new Date().toISOString().slice(0, 10)}.json`;
+    a.download = `mahakal-devotees-backup-${getIstParts().ddmmyyyy}.json`;
     a.click();
     setTimeout(() => URL.revokeObjectURL(url), 5000);
     showStatus('Exported devotee backup JSON.', 'ok');
