@@ -217,6 +217,7 @@ function startServiceCountdown(mode, isMatched, liveStatus) {
   if (reloadBtn) reloadBtn.classList.toggle('hidden', !isMatched);
 
   const isQuotaFull = Boolean(isMatched && liveStatus?.quotaFullAlert);
+  const isSoldOutForDay = Boolean(isMatched && liveStatus?.soldOutForDay);
 
   const update = () => {
     if (vault.bookingMode !== mode) {
@@ -228,7 +229,19 @@ function startServiceCountdown(mode, isMatched, liveStatus) {
 
     clockEl.textContent = formatIstClock(state.ist);
 
-    if (isQuotaFull) {
+    const openSec = state.win.openHour * 3600 + state.win.openMinute * 60 + state.win.openSecond;
+    const nowSec = state.ist.hour * 3600 + state.ist.minute * 60 + state.ist.second;
+    const inOpeningRush = nowSec >= openSec && nowSec < openSec + 120;
+    const nextOpenTomorrowSec = 24 * 3600 - nowSec + openSec;
+
+    if (isSoldOutForDay || (isQuotaFull && !inOpeningRush)) {
+      bar.classList.remove('ready');
+      labelEl.textContent = 'Sold Out Today · Next opens in';
+      digitsEl.textContent = formatCountdownDuration(nextOpenTomorrowSec);
+      return;
+    }
+
+    if (isQuotaFull && inOpeningRush) {
       bar.classList.remove('ready');
       labelEl.textContent = autoReloadEnabled ? 'Quota Full — Retrying' : 'Quota Full on Page';
       digitsEl.textContent = autoReloadEnabled ? 'Auto-reloading (2s)' : 'Click ↻ to retry';
@@ -246,11 +259,16 @@ function startServiceCountdown(mode, isMatched, liveStatus) {
     } else {
       bar.classList.add('ready');
       if (isMatched && !liveStatus?.hasForm) {
-        labelEl.textContent = 'Window OPEN —';
-        digitsEl.textContent = autoReloadEnabled ? 'Auto-reloading...' : 'Reload Tab Now!';
-        if (autoReloadEnabled && autoReloadTriggeredForTarget !== state.targetKey) {
-          autoReloadTriggeredForTarget = state.targetKey;
-          syncBackgroundWatcher(true, mode, false);
+        if (inOpeningRush) {
+          labelEl.textContent = 'Window OPEN —';
+          digitsEl.textContent = autoReloadEnabled ? 'Auto-reloading...' : 'Reload Tab Now!';
+          if (autoReloadEnabled && autoReloadTriggeredForTarget !== state.targetKey) {
+            autoReloadTriggeredForTarget = state.targetKey;
+            syncBackgroundWatcher(true, mode, false);
+          }
+        } else {
+          labelEl.textContent = 'Closed / Done · Next opens in';
+          digitsEl.textContent = formatCountdownDuration(nextOpenTomorrowSec);
         }
       } else {
         labelEl.textContent = 'Window OPEN · Closes in';
@@ -264,16 +282,23 @@ function startServiceCountdown(mode, isMatched, liveStatus) {
 
   if (isMatched) {
     const initialState = getTimedWindowState(mode);
-    const shouldRetryNow = Boolean(autoReloadEnabled && (isQuotaFull || (initialState?.phase === 'open' && !liveStatus?.hasForm)));
+    const nowSec = initialState ? initialState.ist.hour * 3600 + initialState.ist.minute * 60 + initialState.ist.second : 0;
+    const openSec = initialState ? initialState.win.openHour * 3600 + initialState.win.openMinute * 60 + initialState.win.openSecond : 0;
+    const inRushNow = Boolean(initialState && nowSec >= openSec && nowSec < openSec + 120);
+    const shouldRetryNow = Boolean(autoReloadEnabled && !isSoldOutForDay && !liveStatus?.isRestricted && inRushNow && !liveStatus?.hasForm);
     const shouldShowPageTimer = initialState && (initialState.phase === 'before_open' || !liveStatus?.hasForm);
     syncOnPageTimerWidget(Boolean(shouldShowPageTimer), mode, {
-      statusBanner: shouldRetryNow
-        ? (isQuotaFull ? '⏳ Quota full — retrying in 2s...' : '⏳ Waiting for form — reloading in 2s...')
-        : '',
+      statusBanner: isSoldOutForDay
+        ? '✕ Quota full for today · Opens tomorrow'
+        : shouldRetryNow
+          ? (isQuotaFull ? '⏳ Quota full — retrying in 2s...' : '⏳ Waiting for form — reloading in 2s...')
+          : '',
       retrying: shouldRetryNow,
     });
-    if (autoReloadEnabled && !liveStatus?.isRestricted) {
+    if (autoReloadEnabled && !isSoldOutForDay && !liveStatus?.isRestricted && (initialState?.phase === 'before_open' || inRushNow)) {
       syncBackgroundWatcher(true, mode, !shouldRetryNow);
+    } else if (isSoldOutForDay || (!inRushNow && initialState?.phase === 'open')) {
+      syncBackgroundWatcher(false, mode, true);
     }
   }
 }
@@ -393,7 +418,6 @@ async function fetchAdvanceBhasmaOpenDates(forceRefresh = false) {
   const m = nowIst.getUTCMonth();
   const m0 = getMonthRange(y, m);
   const m1 = getMonthRange(m === 11 ? y + 1 : y, (m + 1) % 12);
-  const m2 = getMonthRange(m >= 10 ? y + 1 : y, (m + 2) % 12);
 
   const fetchRange = (range) =>
     new Promise((resolve) => {
@@ -406,16 +430,17 @@ async function fetchAdvanceBhasmaOpenDates(forceRefresh = false) {
       );
     });
 
-  const [r0, r1, r2] = await Promise.all([fetchRange(m0), fetchRange(m1), fetchRange(m2)]);
-  const allDays = [...(r0.days || []), ...(r1.days || []), ...(r2.days || [])].filter(
-    (d) => String(d?.date || '') >= todayIso
+  // Portal Advance Bhasma calendar spans [current month .. end of next month], with June blocked
+  const [r0, r1] = await Promise.all([fetchRange(m0), fetchRange(m1)]);
+  const allDays = [...(r0.days || []), ...(r1.days || [])].filter(
+    (d) => String(d?.date || '') >= todayIso && String(d?.date || '').slice(5, 7) !== '06'
   );
   const openDates = allDays.filter((d) => d.limit_available && !d.is_restricted).map((d) => d.date);
   const restrictedDates = allDays.filter((d) => d.is_restricted).map((d) => d.date);
 
   cachedAdvanceBhasma = {
-    ok: Boolean(r0.ok || r1.ok || r2.ok),
-    windowLabel: `${m0.label} – ${m2.label}`,
+    ok: Boolean(r0.ok || r1.ok),
+    windowLabel: `${m0.label} – ${m1.label}`,
     openDates,
     restrictedDates,
   };
@@ -545,7 +570,7 @@ async function renderServiceLiveInfo(forceRefresh = false) {
 
     if (live?.quotaFullAlert || live?.dangerAlert) {
       badge.className = 'window-badge closed';
-      badge.textContent = '✕ Quota Full / Not Available on Page';
+      badge.textContent = live.soldOutForDay ? '✕ Sold Out Today (Opens Tomorrow)' : '✕ Quota Full / Not Available on Page';
       const datePrefix = live.dateText ? `${live.dateText} · ` : '';
       const alertMsg = live.quotaFullAlert || live.dangerAlert;
       schedEl.textContent = `${datePrefix}Website says: "${alertMsg}"`;
@@ -847,25 +872,46 @@ function addDaysIso(isoStr, days) {
   return new Date(base + days * 86400000).toISOString().slice(0, 10);
 }
 
+// Mirrors portal's dayjs().add(1, "month") rule on Dharmshala calendar
+function addOneMonthIso(isoStr) {
+  const m = String(isoStr || '').match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (!m) return addDaysIso(getIstParts().iso, 30);
+  const y = Number(m[1]);
+  const mo = Number(m[2]) - 1;
+  const d = Number(m[3]);
+  const ny = mo === 11 ? y + 1 : y;
+  const nmo = (mo + 1) % 12;
+  const maxDayInMonth = new Date(Date.UTC(ny, nmo + 1, 0)).getUTCDate();
+  const nd = Math.min(d, maxDayInMonth);
+  return `${String(ny).padStart(4, '0')}-${String(nmo + 1).padStart(2, '0')}-${String(nd).padStart(2, '0')}`;
+}
+
+function getDharmshalaMaxCheckoutIso() {
+  return addOneMonthIso(getIstParts().iso);
+}
+
+function clampDharmshalaDates(inIso, outIso) {
+  const minIn = getDefaultTomorrowIso();
+  const maxOut = getDharmshalaMaxCheckoutIso();
+  const maxIn = addDaysIso(maxOut, -1);
+  let checkIn = inIso && inIso >= minIn && inIso <= maxIn ? inIso : minIn;
+  const minOut = addDaysIso(checkIn, 1);
+  const cappedOut = addDaysIso(checkIn, 2) <= maxOut ? addDaysIso(checkIn, 2) : maxOut;
+  let checkOut = outIso && outIso >= minOut && outIso <= cappedOut ? outIso : minOut;
+  return { minIn, maxIn, minOut, cappedOut, maxOut, checkIn, checkOut };
+}
+
 function renderDharmshalaPrefs() {
   const inEl = $('dCheckIn');
   const outEl = $('dCheckOut');
   if (!inEl || !outEl) return;
-  const minIn = getDefaultTomorrowIso();
-  const maxDate = addDaysIso(getIstParts().iso, 31);
-  inEl.min = minIn;
-  inEl.max = maxDate;
-
-  let checkIn = vault.bookingPrefs?.dCheckIn || minIn;
-  if (checkIn < minIn || checkIn > maxDate) checkIn = minIn;
-  setDualDateValue('dCheckIn', 'dCheckInDisplay', checkIn);
-
-  const minOut = addDaysIso(checkIn, 1);
-  outEl.min = minOut;
-  outEl.max = addDaysIso(minIn, 32);
-  let checkOut = vault.bookingPrefs?.dCheckOut || minOut;
-  if (checkOut <= checkIn) checkOut = minOut;
-  setDualDateValue('dCheckOut', 'dCheckOutDisplay', checkOut);
+  const bounds = clampDharmshalaDates(vault.bookingPrefs?.dCheckIn, vault.bookingPrefs?.dCheckOut);
+  inEl.min = bounds.minIn;
+  inEl.max = bounds.maxIn;
+  setDualDateValue('dCheckIn', 'dCheckInDisplay', bounds.checkIn);
+  outEl.min = bounds.minOut;
+  outEl.max = bounds.cappedOut;
+  setDualDateValue('dCheckOut', 'dCheckOutDisplay', bounds.checkOut);
 }
 
 function renderSelectedDharmshalaSummary() {
@@ -1478,29 +1524,29 @@ function bindEvents() {
     fetchLiveSheeghraSlots(d, false);
   });
 
-  // Dharmshala Offline Room Availability controls
+  // Dharmshala Offline Room Availability controls (enforces portal +1 month & max 2-night limits)
   $('dCheckIn')?.addEventListener('change', async () => {
-    const inDate = $('dCheckIn').value || getDefaultTomorrowIso();
-    setDualDateValue('dCheckIn', 'dCheckInDisplay', inDate);
-    let outDate = $('dCheckOut')?.value || '';
-    if (!outDate || outDate <= inDate) {
-      outDate = addDaysIso(inDate, 1);
-      setDualDateValue('dCheckOut', 'dCheckOutDisplay', outDate);
+    const bounds = clampDharmshalaDates($('dCheckIn').value, $('dCheckOut')?.value);
+    setDualDateValue('dCheckIn', 'dCheckInDisplay', bounds.checkIn);
+    if ($('dCheckOut')) {
+      $('dCheckOut').min = bounds.minOut;
+      $('dCheckOut').max = bounds.cappedOut;
     }
-    if ($('dCheckOut')) $('dCheckOut').min = addDaysIso(inDate, 1);
-    vault.bookingPrefs = { ...(vault.bookingPrefs || {}), dCheckIn: inDate, dCheckOut: outDate };
+    setDualDateValue('dCheckOut', 'dCheckOutDisplay', bounds.checkOut);
+    vault.bookingPrefs = { ...(vault.bookingPrefs || {}), dCheckIn: bounds.checkIn, dCheckOut: bounds.checkOut };
     vault = await saveVault(vault);
     fetchDharmshalaRoomsAvailability(true);
   });
 
   $('dCheckOut')?.addEventListener('change', async () => {
-    const inDate = $('dCheckIn')?.value || getDefaultTomorrowIso();
-    let outDate = $('dCheckOut').value;
-    if (!outDate || outDate <= inDate) {
-      outDate = addDaysIso(inDate, 1);
+    const bounds = clampDharmshalaDates($('dCheckIn')?.value, $('dCheckOut').value);
+    setDualDateValue('dCheckIn', 'dCheckInDisplay', bounds.checkIn);
+    if ($('dCheckOut')) {
+      $('dCheckOut').min = bounds.minOut;
+      $('dCheckOut').max = bounds.cappedOut;
     }
-    setDualDateValue('dCheckOut', 'dCheckOutDisplay', outDate);
-    vault.bookingPrefs = { ...(vault.bookingPrefs || {}), dCheckIn: inDate, dCheckOut: outDate };
+    setDualDateValue('dCheckOut', 'dCheckOutDisplay', bounds.checkOut);
+    vault.bookingPrefs = { ...(vault.bookingPrefs || {}), dCheckIn: bounds.checkIn, dCheckOut: bounds.checkOut };
     vault = await saveVault(vault);
     fetchDharmshalaRoomsAvailability(true);
   });

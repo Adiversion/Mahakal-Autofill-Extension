@@ -17,10 +17,15 @@ const TIMED_WINDOWS = {
 function getWindowStateIst(mode) {
   const win = TIMED_WINDOWS[mode] || TIMED_WINDOWS.bhasma_aarti;
   const ist = new Date(Date.now() + 5.5 * 3600 * 1000);
-  const mins = ist.getUTCHours() * 60 + ist.getUTCMinutes();
-  const openMins = win.openHour * 60 + win.openMinute;
-  const closeMins = win.closeHour * 60 + win.closeMinute;
-  return { ...win, isOpen: mins >= openMins && mins < closeMins };
+  const secsOfDay = ist.getUTCHours() * 3600 + ist.getUTCMinutes() * 60 + ist.getUTCSeconds();
+  const openSecs = win.openHour * 3600 + win.openMinute * 60;
+  const closeSecs = win.closeHour * 3600 + win.closeMinute * 60;
+  return {
+    ...win,
+    isOpen: secsOfDay >= openSecs && secsOfDay < closeSecs,
+    isOpeningRush: secsOfDay >= openSecs && secsOfDay < Math.min(closeSecs, openSecs + 120),
+    isBeforeOpen: secsOfDay < openSecs,
+  };
 }
 
 function getMaxPersonsForMode(mode) {
@@ -203,11 +208,18 @@ async function inspectTabLiveStatus(tabId) {
         document.querySelectorAll('select[formcontrolname="no_of_persons"], .visitor_row, form select, form input:not([type="hidden"])')
       ).some(isVis);
 
+      const combinedAlert = `${quotaFullAlert} ${infoAlert} ${dangerAlert}`;
+      const soldOutForDay = Boolean(
+        !hasForm &&
+        /(will be open on .*? at \d+\s*(?:am|pm)|today's booking is now closed|booking is now closed)/i.test(combinedAlert)
+      );
+
       return {
         ok: true,
         hasForm,
         isLoading,
         quotaFullAlert,
+        soldOutForDay,
         isRestricted,
         dangerAlert,
         successAlert,
@@ -646,7 +658,7 @@ async function evaluateAndHandleArmedTab(tabId) {
     return;
   }
 
-  if (status?.isRestricted) {
+  if (status?.isRestricted || status?.soldOutForDay) {
     await setWatcher({ armed: false });
     await injectTimerWidget(tabId, {
       enabled: true,
@@ -658,13 +670,15 @@ async function evaluateAndHandleArmedTab(tabId) {
       autoReload: false,
       autoFill: latest.autoFill,
       autoContinue: latest.autoContinue,
-      statusBanner: '✕ Date restricted on portal',
+      statusBanner: status?.isRestricted
+        ? '✕ Date restricted on portal'
+        : '✕ Quota full for today · Opens tomorrow',
       retrying: false,
     });
     return;
   }
 
-  const shouldRetry = latest.autoReload && (Boolean(status?.quotaFullAlert) || win.isOpen);
+  const shouldRetry = Boolean(latest.autoReload && win.isOpeningRush && !status?.hasForm);
 
   if (shouldRetry) {
     const banner = status?.quotaFullAlert
@@ -699,6 +713,10 @@ async function evaluateAndHandleArmedTab(tabId) {
     }, latest.retryMs || 2000);
     pendingReloadTimers.set(tabId, timer);
   } else {
+    const waitingOutsideRush = Boolean(latest.autoReload && win.isOpen && !win.isOpeningRush);
+    if (waitingOutsideRush) {
+      await setWatcher({ armed: false });
+    }
     await injectTimerWidget(tabId, {
       enabled: true,
       mode: routeMode,
@@ -706,9 +724,11 @@ async function evaluateAndHandleArmedTab(tabId) {
       targetMinute: win.openMinute,
       closeHour: win.closeHour,
       closeMinute: win.closeMinute,
-      autoReload: latest.autoReload,
+      autoReload: win.isBeforeOpen ? latest.autoReload : false,
       autoFill: latest.autoFill,
       autoContinue: latest.autoContinue,
+      statusBanner: waitingOutsideRush ? '✕ Opening rush ended · Next opens tomorrow' : '',
+      retrying: false,
     });
   }
 }

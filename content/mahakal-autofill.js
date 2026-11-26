@@ -954,9 +954,12 @@
           if (selectedSlot) preParts.push(`Slot ${selectedSlot}`);
 
           if (filledCount === 0 && preParts.length === 0) {
+            const isDharmshalaStep1 = msg.bookingMode === 'dharmshala' || /dharmshala-slot-booking/i.test(location.pathname);
             return sendResponse({
               ok: false,
-              error: 'No slot or booking fields found yet. Open the Sheeghra Darshan / Bhasma Aarti booking page and try again.',
+              error: isDharmshalaStep1
+                ? 'On Dharmshala Step 1: pick Check-in/Check-out dates on the calendar, select a room card below & click Continue — then click Fill on the guest details page.'
+                : 'No slot or booking fields found yet. Open the Sheeghra Darshan / Bhasma Aarti booking page and try again.',
             });
           }
 
