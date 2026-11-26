@@ -435,8 +435,8 @@ async function fetchAdvanceBhasmaOpenDates(forceRefresh = false) {
   const allDays = [...(r0.days || []), ...(r1.days || [])].filter(
     (d) => String(d?.date || '') >= todayIso && String(d?.date || '').slice(5, 7) !== '06'
   );
-  const openDates = allDays.filter((d) => d.limit_available && !d.is_restricted).map((d) => d.date);
-  const restrictedDates = allDays.filter((d) => d.is_restricted).map((d) => d.date);
+  const openDates = [...new Set(allDays.filter((d) => d.limit_available && !d.is_restricted).map((d) => String(d.date).slice(0, 10)))].sort();
+  const restrictedDates = [...new Set(allDays.filter((d) => d.is_restricted).map((d) => String(d.date).slice(0, 10)))].sort();
 
   cachedAdvanceBhasma = {
     ok: Boolean(r0.ok || r1.ok),
@@ -597,18 +597,24 @@ async function renderServiceLiveInfo(forceRefresh = false) {
   }
 
   const allRestricted = await fetchRestrictedDatesCached();
-  const upcomingBlocked = allRestricted
-    .filter((r) => {
-      const slug = String(r?.darshan_type?.slug || '').toLowerCase();
-      const d = String(r?.date || '').slice(0, 10);
-      if (!d || d < ist.iso) return false;
-      if (mode === 'sandhya_aarti') return slug.includes('sandhya');
-      if (mode === 'shayan_aarti') return slug.includes('shayan');
-      if (mode === 'bhasma_aarti') return slug.includes('bhasm');
-      return true;
-    })
+  const upcomingBlocked = [
+    ...new Set(
+      allRestricted
+        .filter((r) => {
+          const slug = String(r?.darshan_type?.slug || '').toLowerCase();
+          const d = String(r?.date || '').slice(0, 10);
+          if (!d || d < ist.iso) return false;
+          if (mode === 'sandhya_aarti') return slug.includes('sandhya');
+          if (mode === 'shayan_aarti') return slug.includes('shayan');
+          if (mode === 'bhasma_aarti') return slug.includes('bhasm');
+          return true;
+        })
+        .map((r) => String(r.date).slice(0, 10))
+    ),
+  ]
+    .sort()
     .slice(0, 3)
-    .map((r) => formatDdMmYyyy(String(r.date).slice(0, 10)));
+    .map((d) => formatDdMmYyyy(d));
 
   const blockedNote = upcomingBlocked.length > 0
     ? ` · Restricted dates: ${upcomingBlocked.join(', ')}`
