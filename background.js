@@ -1,5 +1,5 @@
 // Mahakal Darshan Autofill — MV3 Service Worker
-import { loadVault } from './lib/vault.js';
+import { loadVault, saveVault } from './lib/vault.js';
 
 const PORTAL_HOST_PATTERN = /(^|\.)(shrimahakaleshwar\.mp\.gov\.in|mponline\.gov\.in|mahakaleshwar\.mp\.gov\.in)$/i;
 const WATCHER_KEY = 'mahakalAutoWatcherV1';
@@ -383,6 +383,12 @@ async function injectTimerWidget(tabId, cfg) {
             b.style.color = act ? '#1c1917' : '#fde68a';
           });
           updateFillBtnText();
+          chrome.runtime.sendMessage(
+            { type: 'SET_ACTIVE_BATCH', mode: cfg.mode, batchIndex: activeBatchIdx },
+            () => {
+              void chrome.runtime.lastError;
+            }
+          );
         });
       });
 
@@ -984,6 +990,26 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         sendResponse(result || { ok: false, error: 'No response from page.' });
       } catch (err) {
         sendResponse({ ok: false, error: err?.message || 'Fill failed.' });
+      }
+    })();
+    return true;
+  }
+
+  if (msg.type === 'SET_ACTIVE_BATCH') {
+    (async () => {
+      try {
+        let vault = await loadVault();
+        const mode = msg.mode || vault.bookingMode || 'bhasma_aarti';
+        const maxAllowed = mode === 'sheeghra_darshan' || mode === 'dharmshala' ? 6 : 5;
+        const devotees = vault.devotees || [];
+        const totalBatches = Math.max(1, Math.ceil(devotees.length / maxAllowed));
+        const batchIdx = Math.max(0, Math.min(totalBatches - 1, Number(msg.batchIndex || 0)));
+        const slice = devotees.slice(batchIdx * maxAllowed, (batchIdx + 1) * maxAllowed);
+        vault.selectedIds = slice.map((d) => d.id);
+        vault = await saveVault(vault);
+        sendResponse({ ok: true, batchIndex: batchIdx, selectedIds: vault.selectedIds });
+      } catch (err) {
+        sendResponse({ ok: false, error: err?.message || 'Failed to sync batch.' });
       }
     })();
     return true;

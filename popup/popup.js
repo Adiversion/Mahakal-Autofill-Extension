@@ -172,10 +172,23 @@ function startServiceCountdown(mode, isMatched, liveStatus) {
   stopServiceCountdown();
   const win = TIMED_OPENING_WINDOWS[mode];
   const bar = $('serviceCountdownBar');
+  const autoControls = $('automationControls');
+  const reloadBtn = $('btnReloadPortalTab');
+  const autoWrap = $('lblAutoReload');
+  const chkAuto = $('chkAutoReload');
+  const continueWrap = $('lblAutoContinue');
+  const chkContinue = $('chkAutoContinue');
   if (!win || !bar) return;
 
-  // Keep on-page widget available with ⚡ Auto Fill even when form is open
+  if (autoControls) autoControls.classList.toggle('hidden', !isMatched);
+  if (autoWrap) autoWrap.classList.toggle('hidden', !isMatched);
+  if (continueWrap) continueWrap.classList.toggle('hidden', !isMatched);
+  if (chkAuto) chkAuto.checked = autoReloadEnabled;
+  if (chkContinue) chkContinue.checked = autoContinueEnabled;
+
+  // Keep on-page widget available with Auto Fill even when form is open
   if (isMatched && liveStatus?.hasForm) {
+    bar.classList.add('hidden');
     syncOnPageTimerWidget(true, mode, { hasForm: true });
     syncBackgroundWatcher(false, mode, true);
     return;
@@ -184,18 +197,9 @@ function startServiceCountdown(mode, isMatched, liveStatus) {
   const labelEl = $('countdownLabel');
   const digitsEl = $('countdownTimer');
   const clockEl = $('countdownIstClock');
-  const reloadBtn = $('btnReloadPortalTab');
-  const autoWrap = $('lblAutoReload');
-  const chkAuto = $('chkAutoReload');
-  const continueWrap = $('lblAutoContinue');
-  const chkContinue = $('chkAutoContinue');
 
   bar.classList.remove('hidden');
   if (reloadBtn) reloadBtn.classList.toggle('hidden', !isMatched);
-  if (autoWrap) autoWrap.classList.toggle('hidden', !isMatched);
-  if (continueWrap) continueWrap.classList.toggle('hidden', !isMatched);
-  if (chkAuto) chkAuto.checked = autoReloadEnabled;
-  if (chkContinue) chkContinue.checked = autoContinueEnabled;
 
   const isQuotaFull = Boolean(isMatched && liveStatus?.quotaFullAlert);
 
@@ -350,37 +354,52 @@ async function renderServiceLiveInfo(forceRefresh = false) {
   const infoBox = $('serviceLiveInfo');
   const sheeghraBox = $('sheeghraSlotControls');
   const refreshBtn = $('btnRefreshServiceInfo');
-  if (!infoBox || !sheeghraBox) return;
+  const badge = $('serviceWindowBadge');
+  const autoControls = $('automationControls');
+  const autoWrap = $('lblAutoReload');
+  const continueWrap = $('lblAutoContinue');
+  const chkContinue = $('chkAutoContinue');
+  if (!infoBox || !sheeghraBox || !badge) return;
 
   const mode = vault.bookingMode;
   const isSheeghra = mode === 'sheeghra_darshan';
+  const isMatched = activeTabInfo.onPortal && activeTabInfo.detectedMode === mode;
+
   sheeghraBox.classList.toggle('hidden', !isSheeghra);
   infoBox.classList.toggle('hidden', isSheeghra);
   if (isSheeghra) {
     stopServiceCountdown();
-    if (activeTabInfo.onPortal && activeTabInfo.detectedMode === 'sheeghra_darshan') {
+    if (refreshBtn) refreshBtn.classList.add('hidden');
+    badge.className = 'window-badge open';
+    badge.textContent = vault.lang === 'hi' ? '● 16-दिन विंडो' : '● 16-Day Rolling Window';
+    if (autoControls) autoControls.classList.toggle('hidden', !isMatched);
+    if (autoWrap) autoWrap.classList.add('hidden');
+    if (continueWrap) continueWrap.classList.toggle('hidden', !isMatched);
+    if (chkContinue) chkContinue.checked = autoContinueEnabled;
+    if (isMatched) {
       syncOnPageTimerWidget(true, 'sheeghra_darshan', {
         hasForm: true,
-        statusBanner: '● Sheeghra Form Ready — Click ⚡ Auto Fill!',
+        statusBanner: '● Sheeghra Form Ready — Click Auto Fill!',
       });
     }
+    renderReadinessLine();
     return;
   }
 
-  const badge = $('serviceWindowBadge');
   const reqEl = $('serviceReqSummary');
   const schedEl = $('serviceScheduleText');
-  const isMatched = activeTabInfo.onPortal && activeTabInfo.detectedMode === mode;
   if (refreshBtn) refreshBtn.classList.toggle('hidden', mode !== 'advance_bhasma_aarti' && !isMatched);
   const ist = getIstParts();
   const mins = ist.hour * 60 + ist.minute;
 
   if (mode === 'advance_bhasma_aarti') {
     stopServiceCountdown();
+    if (autoControls) autoControls.classList.add('hidden');
     badge.className = 'window-badge';
     badge.textContent = 'Checking live dates...';
     reqEl.textContent = 'Needs: Name, Photo, Relation, ID';
     schedEl.textContent = 'Checking Advance Bhasma Aarti calendar availability...';
+    renderReadinessLine();
     const adv = await fetchAdvanceBhasmaOpenDates(forceRefresh);
     if (vault.bookingMode !== 'advance_bhasma_aarti') return;
     if (!adv.ok) {
@@ -403,6 +422,7 @@ async function renderServiceLiveInfo(forceRefresh = false) {
         : '';
       schedEl.textContent = `All dates currently grey/full in ${adv.windowLabel}.${restrPreview} Click ↻ later to re-check.`;
     }
+    renderReadinessLine();
     return;
   }
 
@@ -483,10 +503,12 @@ async function renderServiceLiveInfo(forceRefresh = false) {
     badge.textContent = isOpen ? '⏰ Window Active (4:00 – 10:00 PM IST)' : '⏰ Opens Daily 4:00 PM – 10:00 PM IST';
     schedEl.textContent = `Same-day Shayan Aarti (${ist.ddmmyyyy}). Open page to verify live quota availability${blockedNote}.`;
   } else if (mode === 'dharmshala') {
+    if (autoControls) autoControls.classList.add('hidden');
     badge.className = 'window-badge open';
     badge.textContent = '● Live Room Availability on Portal';
     schedEl.textContent = `Pick check-in/out dates on Dharmshala page, then click Fill to populate visitors & address.`;
   }
+  renderReadinessLine();
 }
 
 const $ = (id) => document.getElementById(id);
@@ -594,33 +616,32 @@ async function openPortalModePage(mode) {
 function renderPortalLauncher(liveStatus = null) {
   const dot = $('portalStatusDot');
   const txt = $('portalStatusText');
-  const btnGo = $('btnGoSelectedPage');
-  if (!dot || !txt || !btnGo) return;
+  const btnPortal = $('btnOpenPortal');
+  if (!dot || !txt) return;
 
+  const t = I18N[vault.lang === 'hi' ? 'hi' : 'en'];
   const isMatched = activeTabInfo.onPortal && activeTabInfo.detectedMode === vault.bookingMode;
 
   if (isMatched) {
     if (liveStatus?.quotaFullAlert || liveStatus?.dangerAlert) {
       dot.className = 'status-dot closed';
-      txt.textContent = `${MODE_LABELS[vault.bookingMode]} — Quota Full / Unavailable on Page`;
+      txt.textContent = `${MODE_LABELS[vault.bookingMode]} — Quota Full on Page`;
     } else if (liveStatus && !liveStatus.hasForm && liveStatus.infoAlert) {
       dot.className = 'status-dot';
-      txt.textContent = `${MODE_LABELS[vault.bookingMode]} — Booking Closed on Page`;
+      txt.textContent = `${MODE_LABELS[vault.bookingMode]} — Closed on Page`;
     } else {
       dot.className = 'status-dot connected';
-      txt.textContent = `Connected: ${MODE_LABELS[vault.bookingMode]} — Ready to Fill`;
+      txt.textContent = `${MODE_LABELS[vault.bookingMode]} — Form Ready`;
     }
-    btnGo.classList.add('hidden');
+    if (btnPortal) btnPortal.textContent = t.portalOk;
   } else if (activeTabInfo.onPortal && activeTabInfo.detectedMode) {
     dot.className = 'status-dot';
-    txt.textContent = `Tab is on ${MODE_LABELS[activeTabInfo.detectedMode]}`;
-    btnGo.textContent = `Switch to ${MODE_LABELS[vault.bookingMode]} ↗`;
-    btnGo.classList.remove('hidden');
+    txt.textContent = `Tab on ${MODE_LABELS[activeTabInfo.detectedMode]}`;
+    if (btnPortal) btnPortal.textContent = t.switchPortal;
   } else {
     dot.className = 'status-dot';
-    txt.textContent = `${MODE_LABELS[vault.bookingMode]} selected`;
-    btnGo.textContent = `Open ${MODE_LABELS[vault.bookingMode]} ↗`;
-    btnGo.classList.remove('hidden');
+    txt.textContent = `${MODE_LABELS[vault.bookingMode]} — Not on portal`;
+    if (btnPortal) btnPortal.textContent = t.openPortal;
   }
 }
 
@@ -721,40 +742,86 @@ async function fetchLiveSheeghraSlots(isoDate, silent = false) {
 
 const I18N = {
   en: {
+    brandSub: 'Encrypted Local Vault · Instant Darshan & Aarti',
     langBtn: 'हिं',
-    fillBtn: 'Set Persons & Fill',
+    openPortal: 'Open Portal ↗',
+    switchPortal: 'Switch Tab ↗',
+    portalOk: 'Portal ✓',
+    autoReload: 'Auto-reload (2s)',
+    autoContinue: 'Auto-Continue',
+    fillBtn: 'Fill Form',
+    fillAndContinueBtn: 'Fill & Continue',
     addBtn: '+ Add',
-    otpMob: '📱 OTP Mob',
-    safetyNote: 'Sets Number of Persons + Slot first, then fills devotee details locally. Pauses for OTP, CAPTCHA & payment.',
+    otpMob: '📱 Mob',
     tabDevotees: 'Devotees',
     tabContact: 'Contact & Address',
     tabTools: 'Tools & Backup',
+    emptySelect: 'Select devotees below before filling.',
+    missingPhoto: (n) => `${n} selected devotee(s) missing photo — required for Aarti.`,
+    readyFree: (n, ac) => `Ready: ${n} selected · Free (₹0) · ${ac ? 'Auto-Continue ON' : 'Pauses at Continue / OTP'}`,
+    readyDefault: (n, ac) => `Ready: ${n} selected · ${ac ? 'Auto-Continue ON (pauses OTP/Payment)' : 'Pauses at Continue, OTP & Payment'}`,
   },
   hi: {
+    brandSub: 'सुरक्षित लोकल वॉल्ट · त्वरित दर्शन व आरती',
     langBtn: 'EN',
-    fillBtn: 'व्यक्ति व फॉर्म भरें',
+    openPortal: 'पोर्टल खोलें ↗',
+    switchPortal: 'पेज बदलें ↗',
+    portalOk: 'पोर्टल ✓',
+    autoReload: 'ऑटो-रीलोड (2s)',
+    autoContinue: 'ऑटो-कंटिन्यू',
+    fillBtn: 'फॉर्म भरें',
+    fillAndContinueBtn: 'भरें व Continue',
     addBtn: '+ जोड़ें',
     otpMob: '📱 मोबाइल',
-    safetyNote: 'पहले व्यक्तियों की संख्या व स्लॉट सेट करता है, फिर भक्त विवरण भरता है। OTP/CAPTCHA पर रुकता है।',
     tabDevotees: 'भक्त सूची',
     tabContact: 'संपर्क व पता',
     tabTools: 'टूल्स व बैकअप',
+    emptySelect: 'फॉर्म भरने से पहले नीचे से भक्त चुनें।',
+    missingPhoto: (n) => `चयनित ${n} भक्तों की फ़ोटो नहीं है — आरती के लिए आवश्यक।`,
+    readyFree: (n, ac) => `तैयार: ${n} चयनित · निःशुल्क (₹0) · ${ac ? 'ऑटो-कंटिन्यू चालू' : 'Continue/OTP पर रुकेगा'}`,
+    readyDefault: (n, ac) => `तैयार: ${n} चयनित · ${ac ? 'ऑटो-कंटिन्यू चालू (OTP/पेमेंट पर रुकेगा)' : 'Continue, OTP व पेमेंट पर रुकेगा'}`,
   },
 };
 
+function renderReadinessLine() {
+  const el = $('lblSafetyNote');
+  if (!el) return;
+  const t = I18N[vault.lang === 'hi' ? 'hi' : 'en'];
+  const selected = getSelectedDevotees();
+  const needsPhoto = PHOTO_REQUIRED_MODES.has(vault.bookingMode);
+  const missingPhoto = needsPhoto ? selected.filter((d) => !d.photo?.dataUrl) : [];
+
+  if (selected.length === 0) {
+    el.className = 'readiness-line warn';
+    el.textContent = t.emptySelect;
+  } else if (missingPhoto.length > 0) {
+    el.className = 'readiness-line warn';
+    el.textContent = t.missingPhoto(missingPhoto.length);
+  } else {
+    el.className = 'readiness-line ready';
+    el.textContent = vault.bookingMode === 'bhasma_aarti'
+      ? t.readyFree(selected.length, autoContinueEnabled)
+      : t.readyDefault(selected.length, autoContinueEnabled);
+  }
+}
+
 function applyLanguage() {
   const t = I18N[vault.lang === 'hi' ? 'hi' : 'en'];
+  if ($('brandSub')) $('brandSub').textContent = t.brandSub;
   $('btnToggleLang').textContent = t.langBtn;
-  $('lblFillBtn').textContent = t.fillBtn;
+  $('lblFillBtn').textContent = autoContinueEnabled ? t.fillAndContinueBtn : t.fillBtn;
   $('btnAddDevotee').textContent = t.addBtn;
   $('btnFillMobile').textContent = t.otpMob;
-  $('lblSafetyNote').textContent = t.safetyNote;
+  if ($('txtAutoReload')) $('txtAutoReload').textContent = t.autoReload;
+  if ($('txtAutoContinue')) $('txtAutoContinue').textContent = t.autoContinue;
   const tabBtns = document.querySelectorAll('.tab-btn');
   if (tabBtns[0]) {
     tabBtns[0].childNodes[0].nodeValue = t.tabDevotees + ' ';
   }
   if (tabBtns[1]) tabBtns[1].textContent = t.tabContact;
   if (tabBtns[2]) tabBtns[2].textContent = t.tabTools;
+  renderPortalLauncher(lastLivePageStatus);
+  renderReadinessLine();
 }
 
 function renderContactForm() {
@@ -836,9 +903,11 @@ function renderDevotees() {
   listEl.innerHTML = '';
   if (devotees.length === 0) {
     emptyEl.classList.remove('hidden');
+    renderReadinessLine();
     return;
   }
   emptyEl.classList.add('hidden');
+  renderReadinessLine();
 
   for (const dev of devotees) {
     const isSel = selectedSet.has(dev.id);
@@ -1114,7 +1183,9 @@ async function loadOptionalRemoteAd() {
     if (ad && ad.enabled !== false && ad.title && ad.ctaUrl) {
       $('adTag').textContent = String(ad.tag || 'SPONSORED').slice(0, 18);
       $('adTitle').textContent = String(ad.title).slice(0, 80);
-      $('adDesc').textContent = String(ad.description || '').slice(0, 120);
+      const desc = String(ad.description || '').slice(0, 120);
+      $('adDesc').textContent = desc;
+      $('adDesc').classList.toggle('hidden', !desc);
       $('adCta').textContent = String(ad.ctaText || 'Visit →').slice(0, 20);
       $('adCta').href = String(ad.ctaUrl);
     }
@@ -1212,6 +1283,7 @@ function bindEvents() {
     try {
       localStorage.setItem('mahakalAutoContinue', autoContinueEnabled ? '1' : '0');
     } catch (_) {}
+    applyLanguage();
     const isMatched = activeTabInfo.onPortal && activeTabInfo.detectedMode === vault.bookingMode;
     if (isMatched) {
       syncBackgroundWatcher(autoReloadEnabled, vault.bookingMode, true);
@@ -1232,10 +1304,6 @@ function bindEvents() {
   });
 
   $('btnOpenPortal').addEventListener('click', () => {
-    openPortalModePage(vault.bookingMode);
-  });
-
-  $('btnGoSelectedPage')?.addEventListener('click', () => {
     openPortalModePage(vault.bookingMode);
   });
 

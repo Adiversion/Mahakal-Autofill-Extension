@@ -8,26 +8,26 @@
 </head>
 <body>
   <div class="app">
-    <!-- Header -->
+    <!-- Compact Header -->
     <header class="header">
       <div class="header-top">
         <div class="brand">
           <img src="../assets/icon-48.png" alt="Mahakal Autofill" class="brand-icon" />
           <div>
-            <h1 class="brand-title">Mahakal Darshan Autofill</h1>
-            <p class="brand-sub">Bhasma Aarti &amp; Shighra Darshan · 100% Free</p>
+            <h1 class="brand-title">Mahakal Autofill</h1>
+            <p id="brandSub" class="brand-sub">Local Vault · Instant Form Fill</p>
           </div>
         </div>
         <div class="header-actions">
           <button id="btnToggleLang" class="btn-lang" title="Switch English / Hindi">हिं</button>
-          <button id="btnOpenPortal" class="btn-portal" title="Open shrimahakaleshwar.mp.gov.in">
-            Portal ↗
+          <button id="btnOpenPortal" class="btn-portal" title="Open active service on shrimahakaleshwar.mp.gov.in">
+            Open Portal ↗
           </button>
         </div>
       </div>
 
-      <!-- Single Unified Service Selector (6 Official Mahakaleshwar Services) -->
-      <div class="mode-bar mode-bar-grid" role="tablist" aria-label="Booking type">
+      <!-- Unified 6-Service Selector -->
+      <div class="mode-bar" role="tablist" aria-label="Booking type">
         <button class="mode-pill active" data-mode="sheeghra_darshan">⚡ Sheeghra</button>
         <button class="mode-pill" data-mode="bhasma_aarti">🔱 Tatkal Bhasma</button>
         <button class="mode-pill" data-mode="advance_bhasma_aarti">📅 Advance Bhasma</button>
@@ -44,74 +44,79 @@
       <button class="tab-btn" data-tab="tools">Tools &amp; Backup</button>
     </nav>
 
-    <!-- Status / Feedback Banner -->
+    <!-- Toast Status Banner -->
     <div id="statusBanner" class="status-banner hidden" role="status"></div>
 
-    <!-- TAB 1: DEVOTEES -->
+    <!-- TAB 1: DEVOTEES & RUN CONTROL -->
     <section id="tab-devotees" class="tab-panel active">
-      <!-- Unified Live Service Status + Dynamic Availability Panel (Zero Duplicate Buttons!) -->
-      <div id="liveServicePanel" class="slot-panel">
-        <div class="portal-page-status">
+      <!-- Unified Live Control Card -->
+      <div id="liveServicePanel" class="control-card">
+        <div class="control-status-row">
           <span id="portalStatusDot" class="status-dot"></span>
-          <span id="portalStatusText">Sheeghra Darshan</span>
-          <button type="button" id="btnGoSelectedPage" class="btn-go-page">Open Page ↗</button>
+          <span id="portalStatusText" class="portal-status-text">Sheeghra Darshan</span>
+          <span id="serviceWindowBadge" class="window-badge hidden">Checking...</span>
+          <button type="button" id="btnRefreshServiceInfo" class="btn-icon-sm hidden" title="Refresh live status / dates">↻</button>
         </div>
 
-        <!-- Shown when Sheeghra Darshan is selected -->
+        <!-- Sheeghra Date & Slot Controls -->
         <div id="sheeghraSlotControls" class="slot-row">
           <div class="slot-field">
             <label for="sDate">Darshan Date</label>
             <input id="sDate" type="date" />
           </div>
           <div class="slot-field slot-grow">
-            <label for="sSlot">Available Slot <span id="slotMeta" class="slot-meta"></span></label>
+            <label for="sSlot">Slot <span id="slotMeta" class="slot-meta"></span></label>
             <select id="sSlot">
-              <option value="">-- Click Refresh for live slots --</option>
+              <option value="">-- Click ↻ for live slots --</option>
             </select>
           </div>
           <button type="button" id="btnFetchSlots" class="btn-slot-refresh" title="Fetch live available slots">↻</button>
         </div>
 
-        <!-- Shown for Tatkal Bhasma / Advance Bhasma / Sandhya / Shayan / Dharmshala -->
+        <!-- Timed / Live Info Block (Tatkal, Advance, Sandhya, Shayan, Dharmshala) -->
         <div id="serviceLiveInfo" class="service-live-info hidden">
-          <div class="live-info-row">
-            <span id="serviceWindowBadge" class="window-badge">Checking...</span>
-            <span id="serviceReqSummary" class="req-summary"></span>
-            <button type="button" id="btnRefreshServiceInfo" class="btn-mini-refresh hidden" title="Refresh live open dates">↻</button>
-          </div>
           <div id="serviceCountdownBar" class="countdown-bar hidden">
             <div class="countdown-main">
               <span id="countdownLabel" class="countdown-label">Opens in</span>
               <span id="countdownTimer" class="countdown-digits">00m 00s</span>
-              <span id="countdownIstClock" class="countdown-clock">IST --:--:--</span>
             </div>
-            <div class="countdown-actions">
-              <label id="lblAutoReload" class="auto-reload-toggle hidden" title="Auto-reload at 8:00 AM and keep retrying every 2s while Quota Full message is shown">
-                <input id="chkAutoReload" type="checkbox" />
-                <span>Auto-reload (8 AM / Quota)</span>
-              </label>
-              <label id="lblAutoContinue" class="auto-reload-toggle hidden" title="Automatically fill selected devotees when form opens, wait for photo uploads, and click Continue">
-                <input id="chkAutoContinue" type="checkbox" />
-                <span>Auto-Fill &amp; Continue</span>
-              </label>
-              <button type="button" id="btnReloadPortalTab" class="btn-mini-action hidden" title="Reload active portal tab to load form">↻ Reload</button>
+            <div class="countdown-right">
+              <span id="countdownIstClock" class="countdown-clock">IST --:--:--</span>
+              <button type="button" id="btnReloadPortalTab" class="btn-mini-action hidden" title="Reload active portal tab">↻ Reload</button>
             </div>
           </div>
-          <div id="serviceScheduleText" class="live-schedule-text"></div>
+          <div class="live-meta-row">
+            <span id="serviceScheduleText" class="live-schedule-text"></span>
+            <span id="serviceReqSummary" class="req-summary"></span>
+          </div>
         </div>
+
+        <!-- Automation Toggles (Available on Sheeghra + Timed Aartis) -->
+        <div id="automationControls" class="automation-row hidden">
+          <label id="lblAutoReload" class="toggle-chip hidden" title="Auto-reload at opening time and retry every 2s while Quota Full">
+            <input id="chkAutoReload" type="checkbox" />
+            <span id="txtAutoReload">Auto-reload (Open &amp; Quota)</span>
+          </label>
+          <label id="lblAutoContinue" class="toggle-chip hidden" title="Automatically fill selected devotees and click Continue">
+            <input id="chkAutoContinue" type="checkbox" />
+            <span id="txtAutoContinue">Auto-Fill &amp; Continue</span>
+          </label>
+        </div>
+
+        <!-- Primary Action Strip -->
+        <div class="action-strip">
+          <button id="btnFillAll" class="btn-primary">
+            ⚡ <span id="lblFillBtn">Fill Form</span> (<span id="selectedCountLabel">0</span>/<span id="maxPersonsLabel">6</span>)
+          </button>
+          <button id="btnFillMobile" class="btn-secondary" title="Quick-fill Mobile Number on OTP login screen">📱 OTP</button>
+          <button id="btnAddDevotee" class="btn-secondary">+ Add</button>
+        </div>
+
+        <!-- Single-line Mode Readiness Indicator -->
+        <div id="lblSafetyNote" class="readiness-line"></div>
       </div>
 
-      <div class="action-strip">
-        <button id="btnFillAll" class="btn-primary">
-          ⚡ <span id="lblFillBtn">Set Persons &amp; Fill</span> (<span id="selectedCountLabel">0</span>/<span id="maxPersonsLabel">6</span>)
-        </button>
-        <button id="btnFillMobile" class="btn-secondary" title="Quick-fill Mobile Number on OTP login screen">📱 OTP Mob</button>
-        <button id="btnAddDevotee" class="btn-secondary">+ Add</button>
-      </div>
-      <p id="lblSafetyNote" class="safety-note">
-        Sets Number of Persons + Slot first, then fills devotee details locally. Pauses for OTP, CAPTCHA &amp; payment.
-      </p>
-
+      <!-- Synced Batch & Selection Bar -->
       <div id="devoteeSelectionBar" class="selection-bar hidden">
         <span id="selectionSummary" class="selection-summary"></span>
         <div id="batchQuickBar" class="batch-bar hidden"></div>
@@ -125,7 +130,7 @@
       <div id="emptyDevotees" class="empty-card hidden">
         <div class="empty-icon">🙏</div>
         <h3>No Family Devotees Saved Yet</h3>
-        <p>Save up to 20 family members once (encrypted locally on your device) and fill Bhasma Aarti or Shighra Darshan forms in 1 click.</p>
+        <p>Save up to 20 family members once (encrypted locally) and fill any Mahakaleshwar form in 1 click.</p>
         <button id="btnEmptyAdd" class="btn-primary">+ Add First Devotee</button>
       </div>
     </section>
@@ -211,7 +216,7 @@
 
         <div class="btn-row">
           <button type="submit" class="btn-primary">💾 Save Contact Details</button>
-          <button type="button" id="btnFillContact" class="btn-secondary">⚡ Fill Contact on Page</button>
+          <button type="button" id="btnFillContact" class="btn-secondary">⚡ Fill Contact</button>
         </div>
       </form>
     </section>
@@ -230,7 +235,7 @@
 
       <div class="tool-card">
         <h3>🔐 Local Encrypted Vault Backup</h3>
-        <p>All Aadhaar numbers, devotee details &amp; photos are encrypted locally with AES-256-GCM and never leave your browser. Export to transfer to another PC.</p>
+        <p>All Aadhaar numbers, devotee details &amp; photos are encrypted locally with AES-256-GCM. Export to transfer to another Chrome profile.</p>
         <div class="btn-row">
           <button id="btnExportVault" class="btn-secondary">⬇ Export Backup (.json)</button>
           <label class="btn-ghost file-btn">
@@ -269,8 +274,8 @@
               <input id="dName" type="text" required placeholder="Exact match to Govt ID" />
             </div>
             <div class="field">
-              <label for="dAge">Age *</label>
-              <input id="dAge" type="number" min="1" max="120" required placeholder="e.g. 34" />
+              <label for="dAge">Age <span class="label-hint">(Sheeghra/Aarti)</span></label>
+              <input id="dAge" type="number" min="1" max="120" placeholder="e.g. 34" />
             </div>
           </div>
 
@@ -315,7 +320,7 @@
           </div>
 
           <div class="field">
-            <label>Visitor Photo <span class="label-hint">(Required for Bhasma / Sandhya / Shayan Aarti · Not needed for Sheeghra)</span></label>
+            <label>Visitor Photo <span class="label-hint">(Required for Bhasma / Sandhya / Shayan · Auto-compressed ≤ 80 KB)</span></label>
             <div class="photo-inline-row">
               <label class="upload-box upload-box-inline" id="photoUploadLabel">
                 <img id="photoThumb" class="upload-thumb hidden" alt="Photo preview" />
@@ -334,14 +339,14 @@
       </div>
     </div>
 
-    <!-- Tasteful Ad / KasyHQ Spotlight Slot (100% Free Ad-Supported Footer) -->
+    <!-- Compact Footer -->
     <footer id="adCard" class="ad-card">
-      <div class="ad-top">
-        <span class="ad-tag" id="adTag">SPONSORED</span>
+      <div class="ad-line">
+        <span class="ad-tag" id="adTag">FREE</span>
+        <span class="ad-title" id="adTitle">KasyHQ · Creators of ReturnPilot GST &amp; TDS</span>
         <a id="adCta" class="ad-cta" href="https://kasyhq.com" target="_blank" rel="noopener">Explore →</a>
       </div>
-      <div class="ad-title" id="adTitle">Free by KasyHQ · Creators of ReturnPilot GST &amp; TDS</div>
-      <div class="ad-desc" id="adDesc">1-click GST &amp; Income Tax portal automation built for Indian CAs &amp; practices.</div>
+      <div class="ad-desc hidden" id="adDesc"></div>
     </footer>
   </div>
 
