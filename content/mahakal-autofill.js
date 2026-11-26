@@ -610,8 +610,7 @@
       if (ok) {
         count++;
         if (el.type === 'radio' && el.name) filledRadioNames.add(el.name);
-        if (key === 'idType') await sleep(150);
-        if (key === 'photoFile' || key === 'idScanFile') await sleep(200);
+        if (key === 'idType') await sleep(30);
       }
     }
     return count;
@@ -710,8 +709,12 @@
     }
     const ok = await setControlValue(targetEl, String(effectiveCount), 'persons');
     if (ok) {
-      // Allow Angular 19 change detection + generateVisitorsRows() / addPilgrim() to render visitor rows
-      await sleep(360);
+      // Poll briefly until Angular 19 renders all expected visitor rows (typically 16-40ms)
+      const deadline = Date.now() + 450;
+      while (Date.now() < deadline) {
+        if (detectDevoteeControlGroups().length >= effectiveCount) break;
+        await sleep(20);
+      }
     }
     return ok ? effectiveCount : false;
   }
@@ -720,11 +723,11 @@
    * Selects a matching AVAILABLE Sheeghra Darshan slot card (e.g. "Slot 06:00 AM To 07:00 AM")
    * ONLY when the card shows AVAILABLE (never clicks Inactive / Full / 0 Available slots).
    */
-  async function selectAvailableSlotCardOnPage(preferredSlot) {
+  async function selectAvailableSlotCardOnPage(preferredSlot, allowFirstFallback = false) {
     const targetNorm = cleanText(preferredSlot).toLowerCase().replace(/^slot\s+/i, '');
-    if (!targetNorm) return null;
+    if (!targetNorm && !allowFirstFallback) return null;
 
-    const candidates = Array.from(
+    const availableCards = Array.from(
       document.querySelectorAll('button, [role="button"], .slot-card, .card, div, li')
     ).filter((el) => {
       if (!isVisible(el)) return false;
@@ -732,21 +735,26 @@
       if (txt.length < 15 || txt.length > 220) return false;
       const lower = txt.toLowerCase();
       if (!lower.includes('available')) return false;
-      if (/\b0\s*available\b|inactive|sold\s*out|unavailable/i.test(lower)) return false;
-      return lower.includes(targetNorm);
+      return !/\b0\s*available\b|inactive|sold\s*out|unavailable/i.test(lower);
     });
 
-    // Pick the innermost clickable card (smallest element that contains BOTH "available" and the slot time)
-    const leaf = candidates.filter((el) => !candidates.some((other) => other !== el && el.contains(other)));
-    if (leaf.length === 0) return null;
+    const leafAll = availableCards.filter((el) => !availableCards.some((other) => other !== el && el.contains(other)));
+    if (leafAll.length === 0) return null;
 
-    const card = leaf[0];
+    let chosen = targetNorm
+      ? leafAll.find((el) => cleanText(el.textContent).toLowerCase().includes(targetNorm))
+      : null;
+    if (!chosen && allowFirstFallback) {
+      chosen = leafAll[0];
+    }
+    if (!chosen) return null;
+
     try {
-      card.scrollIntoView({ behavior: 'smooth', block: 'center' });
-      card.click();
-      highlightElement(card);
-      await sleep(260);
-      return preferredSlot;
+      chosen.scrollIntoView({ behavior: 'smooth', block: 'center' });
+      chosen.click();
+      highlightElement(chosen);
+      await sleep(160);
+      return preferredSlot || cleanText(chosen.textContent).slice(0, 40);
     } catch (_) {
       return null;
     }
@@ -777,6 +785,52 @@
       document.body.appendChild(div);
       setTimeout(() => div.remove(), 5500);
     } catch (_) {}
+  }
+
+  async function waitForUploadsAndClickContinue(timeoutMs = 15000) {
+    // Allow Angular /add_image requests to toggle .global-loader-overlay
+    await sleep(450);
+    const deadline = Date.now() + timeoutMs;
+
+    while (Date.now() < deadline) {
+      const loaderActive = Boolean(document.querySelector('.global-loader-overlay'));
+      const previewImgs = Array.from(document.querySelectorAll('.visitor_row .preview img')).filter(isVisible);
+      const allImagesUploaded = previewImgs.length === 0 || previewImgs.every((img) => {
+        const src = String(img.getAttribute('src') || img.src || '');
+        return src.length > 0 && !src.startsWith('data:');
+      });
+
+      const submitBtn = Array.from(
+        document.querySelectorAll('button[type="submit"][name="send"], form button[type="submit"], button.btn-primary, button.btn-continue')
+      ).find((b) => {
+        if (!isVisible(b)) return false;
+        const txt = cleanText(b.textContent).toLowerCase();
+        return txt === 'continue' || txt.includes('continue');
+      });
+
+      if (!loaderActive && allImagesUploaded && submitBtn && !submitBtn.disabled) {
+        submitBtn.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        await sleep(100);
+        submitBtn.click();
+        return { clicked: true };
+      }
+
+      await sleep(150);
+    }
+
+    // Fallback: only click Continue (never Pay/Back)
+    const finalBtn = Array.from(
+      document.querySelectorAll('button[type="submit"][name="send"], form button[type="submit"], button.btn-primary, button.btn-continue')
+    ).find((b) => {
+      if (!isVisible(b) || b.disabled) return false;
+      const txt = cleanText(b.textContent).toLowerCase();
+      return txt === 'continue' || txt.includes('continue');
+    });
+    if (!document.querySelector('.global-loader-overlay') && finalBtn) {
+      finalBtn.click();
+      return { clicked: true };
+    }
+    return { clicked: false, reason: 'Continue button stayed disabled or upload timed out.' };
   }
 
   function inspectCurrentPage() {
@@ -860,9 +914,9 @@
           // STEP 1 (Sheeghra Darshan / Slot Booking): Set Number of Persons FIRST so Angular generates N visitor rows
           const personsSet = await setNumberOfPersonsOnPage(personCount);
 
-          // STEP 2: Select the user's chosen AVAILABLE time slot card (if visible on the slot screen)
-          const selectedSlot = msg.preferredSlot
-            ? await selectAvailableSlotCardOnPage(msg.preferredSlot)
+          // STEP 2: Select the user's chosen AVAILABLE time slot card (or first available on Sheeghra)
+          const selectedSlot = msg.preferredSlot || msg.bookingMode === 'sheeghra_darshan'
+            ? await selectAvailableSlotCardOnPage(msg.preferredSlot || '', msg.bookingMode === 'sheeghra_darshan')
             : null;
 
           // STEP 3: Fill generated visitor rows + contact/address details
@@ -871,11 +925,24 @@
           let filledDevotees = 0;
 
           const countToFill = Math.min(devotees.length, groups.length);
-          for (let i = 0; i < countToFill; i++) {
-            const c = await fillDevoteeIntoControls(groups[i], devotees[i]);
-            if (c > 0) {
-              filledCount += c;
-              filledDevotees++;
+          const hasCombobox = groups.slice(0, countToFill).some((g) => g.some(isCustomCombobox));
+          if (hasCombobox) {
+            for (let i = 0; i < countToFill; i++) {
+              const c = await fillDevoteeIntoControls(groups[i], devotees[i]);
+              if (c > 0) {
+                filledCount += c;
+                filledDevotees++;
+              }
+            }
+          } else {
+            const counts = await Promise.all(
+              Array.from({ length: countToFill }, (_, i) => fillDevoteeIntoControls(groups[i], devotees[i]))
+            );
+            for (const c of counts) {
+              if (c > 0) {
+                filledCount += c;
+                filledDevotees++;
+              }
             }
           }
 
@@ -894,7 +961,13 @@
           }
 
           if (filledCount === 0 && preParts.length > 0) {
-            const slotSummary = `Set ${preParts.join(' & ')}! Proceed to the devotee details step, then click Fill again.`;
+            let continueResult = null;
+            if (msg.autoContinue) {
+              continueResult = await waitForUploadsAndClickContinue(4500);
+            }
+            const slotSummary = continueResult?.clicked
+              ? `Set ${preParts.join(' & ')} → Clicked Continue!`
+              : `Set ${preParts.join(' & ')}! Proceed to the devotee details step, then click Fill again.`;
             showPageToast(slotSummary);
             return sendResponse({
               ok: true,
@@ -902,6 +975,7 @@
               selectedSlot,
               filledCount: 0,
               filledDevotees: 0,
+              continueClicked: Boolean(continueResult?.clicked),
               summary: slotSummary,
             });
           }
@@ -909,9 +983,27 @@
           const prefix = preParts.length > 0 ? `${preParts.join(' + ')} → ` : '';
           const skipped = devotees.length - countToFill;
           const skippedNote = skipped > 0 ? ` (${skipped} skipped — add more rows on the portal first)` : '';
-          const summary = `${prefix}Filled ${filledDevotees} devotee(s) + ${contactFilled} contact field(s)${skippedNote}. Verify & complete OTP/CAPTCHA.`;
+
+          let continueResult = null;
+          if (msg.autoContinue && filledCount > 0) {
+            showPageToast(`${prefix}Filled ${filledDevotees} devotee(s) — waiting for photo uploads to click Continue...`);
+            continueResult = await waitForUploadsAndClickContinue(15000);
+          }
+
+          const continueNote = continueResult
+            ? (continueResult.clicked ? ' → Clicked Continue!' : ` (${continueResult.reason})`)
+            : ' Verify & click Continue.';
+          const summary = `${prefix}Filled ${filledDevotees} devotee(s) + ${contactFilled} contact field(s)${skippedNote}.${continueNote}`;
           showPageToast(summary);
-          return sendResponse({ ok: true, personsSet, selectedSlot, filledCount, filledDevotees, summary });
+          return sendResponse({
+            ok: true,
+            personsSet,
+            selectedSlot,
+            filledCount,
+            filledDevotees,
+            continueClicked: Boolean(continueResult?.clicked),
+            summary,
+          });
         }
 
         sendResponse({ ok: false, error: `Unsupported action: ${msg.action}` });

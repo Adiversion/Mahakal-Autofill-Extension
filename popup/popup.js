@@ -42,6 +42,222 @@ let activeTabInfo = { id: null, url: '', detectedMode: null, onPortal: false };
 let cachedRestrictedDates = null;
 let cachedAdvanceBhasma = null;
 let lastLivePageStatus = null;
+let countdownTimerId = null;
+let autoReloadEnabled = false;
+let autoContinueEnabled = false;
+let autoReloadTriggeredForTarget = '';
+
+const TIMED_OPENING_WINDOWS = {
+  bhasma_aarti: { openHour: 8, openMinute: 0, openSecond: 0, closeHour: 24, closeMinute: 0, label: '8:00 AM IST' },
+  sandhya_aarti: { openHour: 12, openMinute: 0, openSecond: 0, closeHour: 18, closeMinute: 30, label: '12:00 PM IST' },
+  shayan_aarti: { openHour: 16, openMinute: 0, openSecond: 0, closeHour: 22, closeMinute: 0, label: '4:00 PM IST' },
+};
+
+function getIstParts() {
+  const ist = new Date(Date.now() + 5.5 * 60 * 60 * 1000);
+  return {
+    hour: ist.getUTCHours(),
+    minute: ist.getUTCMinutes(),
+    second: ist.getUTCSeconds(),
+    iso: ist.toISOString().slice(0, 10),
+    ddmmyyyy: `${String(ist.getUTCDate()).padStart(2, '0')}-${String(ist.getUTCMonth() + 1).padStart(2, '0')}-${ist.getUTCFullYear()}`,
+  };
+}
+
+function formatIstClock(ist) {
+  const ap = ist.hour >= 12 ? 'PM' : 'AM';
+  const hh = String(ist.hour % 12 || 12).padStart(2, '0');
+  return `IST ${hh}:${String(ist.minute).padStart(2, '0')}:${String(ist.second).padStart(2, '0')} ${ap}`;
+}
+
+function formatCountdownDuration(totalSeconds) {
+  const sec = Math.max(0, Math.ceil(totalSeconds));
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const s = sec % 60;
+  return h > 0
+    ? `${String(h).padStart(2, '0')}h ${String(m).padStart(2, '0')}m ${String(s).padStart(2, '0')}s`
+    : `${String(m).padStart(2, '0')}m ${String(s).padStart(2, '0')}s`;
+}
+
+function getTimedWindowState(mode) {
+  const win = TIMED_OPENING_WINDOWS[mode];
+  if (!win) return null;
+  const ist = getIstParts();
+  const nowSec = ist.hour * 3600 + ist.minute * 60 + ist.second;
+  const openSec = win.openHour * 3600 + win.openMinute * 60 + win.openSecond;
+  const closeSec = win.closeHour * 3600 + win.closeMinute * 60;
+
+  if (nowSec < openSec) {
+    return {
+      phase: 'before_open',
+      remainingSec: openSec - nowSec,
+      ist,
+      win,
+      targetKey: `${ist.iso}-${mode}-${win.openHour}`,
+    };
+  }
+  if (nowSec < closeSec) {
+    return {
+      phase: 'open',
+      remainingToCloseSec: closeSec - nowSec,
+      ist,
+      win,
+      targetKey: `${ist.iso}-${mode}-${win.openHour}`,
+    };
+  }
+  return {
+    phase: 'after_close',
+    remainingSec: 24 * 3600 - nowSec + openSec,
+    ist,
+    win,
+    targetKey: `${ist.iso}-next-${mode}`,
+  };
+}
+
+function stopServiceCountdown() {
+  if (countdownTimerId) {
+    clearInterval(countdownTimerId);
+    countdownTimerId = null;
+  }
+  const bar = $('serviceCountdownBar');
+  if (bar) bar.classList.add('hidden');
+}
+
+function syncOnPageTimerWidget(enabled, mode, extra = {}) {
+  const win = TIMED_OPENING_WINDOWS[mode];
+  const isTimed = Boolean(win);
+  chrome.runtime.sendMessage(
+    {
+      type: 'SYNC_PAGE_TIMER',
+      enabled: Boolean(enabled && (isTimed || mode === 'sheeghra_darshan')),
+      isTimed,
+      hasForm: Boolean(extra.hasForm ?? (lastLivePageStatus?.mode === mode && lastLivePageStatus?.hasForm)),
+      mode,
+      label: MODE_LABELS[mode] || 'Booking Timer',
+      targetHour: win?.openHour ?? 8,
+      targetMinute: win?.openMinute ?? 0,
+      targetSecond: win?.openSecond ?? 0,
+      closeHour: win?.closeHour ?? 24,
+      closeMinute: win?.closeMinute ?? 0,
+      autoReload: isTimed ? autoReloadEnabled : false,
+      autoFillAndContinue: autoContinueEnabled,
+      statusBanner: extra.statusBanner || '',
+      retrying: Boolean(extra.retrying),
+    },
+    () => {
+      void chrome.runtime.lastError;
+    }
+  );
+}
+
+function syncBackgroundWatcher(armed, mode, skipImmediate = false) {
+  chrome.runtime.sendMessage(
+    {
+      type: 'SET_AUTO_WATCHER',
+      armed: Boolean(armed),
+      tabId: activeTabInfo.id,
+      mode,
+      autoReload: autoReloadEnabled,
+      autoFillAndContinue: autoContinueEnabled,
+      skipImmediate,
+    },
+    () => {
+      void chrome.runtime.lastError;
+    }
+  );
+}
+
+function startServiceCountdown(mode, isMatched, liveStatus) {
+  stopServiceCountdown();
+  const win = TIMED_OPENING_WINDOWS[mode];
+  const bar = $('serviceCountdownBar');
+  if (!win || !bar) return;
+
+  // Keep on-page widget available with ⚡ Auto Fill even when form is open
+  if (isMatched && liveStatus?.hasForm) {
+    syncOnPageTimerWidget(true, mode, { hasForm: true });
+    syncBackgroundWatcher(false, mode, true);
+    return;
+  }
+
+  const labelEl = $('countdownLabel');
+  const digitsEl = $('countdownTimer');
+  const clockEl = $('countdownIstClock');
+  const reloadBtn = $('btnReloadPortalTab');
+  const autoWrap = $('lblAutoReload');
+  const chkAuto = $('chkAutoReload');
+  const continueWrap = $('lblAutoContinue');
+  const chkContinue = $('chkAutoContinue');
+
+  bar.classList.remove('hidden');
+  if (reloadBtn) reloadBtn.classList.toggle('hidden', !isMatched);
+  if (autoWrap) autoWrap.classList.toggle('hidden', !isMatched);
+  if (continueWrap) continueWrap.classList.toggle('hidden', !isMatched);
+  if (chkAuto) chkAuto.checked = autoReloadEnabled;
+  if (chkContinue) chkContinue.checked = autoContinueEnabled;
+
+  const isQuotaFull = Boolean(isMatched && liveStatus?.quotaFullAlert);
+
+  const update = () => {
+    if (vault.bookingMode !== mode) {
+      stopServiceCountdown();
+      return;
+    }
+    const state = getTimedWindowState(mode);
+    if (!state) return;
+
+    clockEl.textContent = formatIstClock(state.ist);
+
+    if (isQuotaFull) {
+      bar.classList.remove('ready');
+      labelEl.textContent = autoReloadEnabled ? 'Quota Full — Retrying' : 'Quota Full on Page';
+      digitsEl.textContent = autoReloadEnabled ? 'Auto-reloading (2s)' : 'Click ↻ to retry';
+      return;
+    }
+
+    if (state.phase === 'before_open') {
+      bar.classList.remove('ready');
+      labelEl.textContent = `Opens in`;
+      digitsEl.textContent = formatCountdownDuration(state.remainingSec);
+    } else if (state.phase === 'after_close') {
+      bar.classList.remove('ready');
+      labelEl.textContent = `Next opens in`;
+      digitsEl.textContent = formatCountdownDuration(state.remainingSec);
+    } else {
+      bar.classList.add('ready');
+      if (isMatched && !liveStatus?.hasForm) {
+        labelEl.textContent = 'Window OPEN —';
+        digitsEl.textContent = autoReloadEnabled ? 'Auto-reloading...' : 'Reload Tab Now!';
+        if (autoReloadEnabled && autoReloadTriggeredForTarget !== state.targetKey) {
+          autoReloadTriggeredForTarget = state.targetKey;
+          syncBackgroundWatcher(true, mode, false);
+        }
+      } else {
+        labelEl.textContent = 'Window OPEN · Closes in';
+        digitsEl.textContent = formatCountdownDuration(state.remainingToCloseSec);
+      }
+    }
+  };
+
+  update();
+  countdownTimerId = setInterval(update, 250);
+
+  if (isMatched) {
+    const initialState = getTimedWindowState(mode);
+    const shouldRetryNow = Boolean(autoReloadEnabled && (isQuotaFull || (initialState?.phase === 'open' && !liveStatus?.hasForm)));
+    const shouldShowPageTimer = initialState && (initialState.phase === 'before_open' || !liveStatus?.hasForm);
+    syncOnPageTimerWidget(Boolean(shouldShowPageTimer), mode, {
+      statusBanner: shouldRetryNow
+        ? (isQuotaFull ? '⏳ Quota full — retrying in 2s...' : '⏳ Waiting for form — reloading in 2s...')
+        : '',
+      retrying: shouldRetryNow,
+    });
+    if (autoReloadEnabled && !liveStatus?.isRestricted) {
+      syncBackgroundWatcher(true, mode, !shouldRetryNow);
+    }
+  }
+}
 
 async function readLivePageStatus(forceRefresh = false) {
   if (!activeTabInfo.onPortal || activeTabInfo.detectedMode !== vault.bookingMode) {
@@ -118,16 +334,6 @@ async function fetchAdvanceBhasmaOpenDates(forceRefresh = false) {
   return cachedAdvanceBhasma;
 }
 
-function getIstParts() {
-  const ist = new Date(Date.now() + 5.5 * 60 * 60 * 1000);
-  return {
-    hour: ist.getUTCHours(),
-    minute: ist.getUTCMinutes(),
-    iso: ist.toISOString().slice(0, 10),
-    ddmmyyyy: `${String(ist.getUTCDate()).padStart(2, '0')}-${String(ist.getUTCMonth() + 1).padStart(2, '0')}-${ist.getUTCFullYear()}`,
-  };
-}
-
 async function fetchRestrictedDatesCached() {
   if (cachedRestrictedDates !== null) return cachedRestrictedDates;
   const res = await new Promise((resolve) => {
@@ -150,7 +356,16 @@ async function renderServiceLiveInfo(forceRefresh = false) {
   const isSheeghra = mode === 'sheeghra_darshan';
   sheeghraBox.classList.toggle('hidden', !isSheeghra);
   infoBox.classList.toggle('hidden', isSheeghra);
-  if (isSheeghra) return;
+  if (isSheeghra) {
+    stopServiceCountdown();
+    if (activeTabInfo.onPortal && activeTabInfo.detectedMode === 'sheeghra_darshan') {
+      syncOnPageTimerWidget(true, 'sheeghra_darshan', {
+        hasForm: true,
+        statusBanner: '● Sheeghra Form Ready — Click ⚡ Auto Fill!',
+      });
+    }
+    return;
+  }
 
   const badge = $('serviceWindowBadge');
   const reqEl = $('serviceReqSummary');
@@ -161,6 +376,7 @@ async function renderServiceLiveInfo(forceRefresh = false) {
   const mins = ist.hour * 60 + ist.minute;
 
   if (mode === 'advance_bhasma_aarti') {
+    stopServiceCountdown();
     badge.className = 'window-badge';
     badge.textContent = 'Checking live dates...';
     reqEl.textContent = 'Needs: Name, Photo, Relation, ID';
@@ -203,12 +419,14 @@ async function renderServiceLiveInfo(forceRefresh = false) {
     const live = await readLivePageStatus(forceRefresh);
     if (vault.bookingMode !== mode) return;
     renderPortalLauncher(live);
+    startServiceCountdown(mode, true, live);
 
-    if (live?.dangerAlert) {
+    if (live?.quotaFullAlert || live?.dangerAlert) {
       badge.className = 'window-badge closed';
       badge.textContent = '✕ Quota Full / Not Available on Page';
       const datePrefix = live.dateText ? `${live.dateText} · ` : '';
-      schedEl.textContent = `${datePrefix}Website says: "${live.dangerAlert}"`;
+      const alertMsg = live.quotaFullAlert || live.dangerAlert;
+      schedEl.textContent = `${datePrefix}Website says: "${alertMsg}"`;
       return;
     }
     if (live?.hasForm) {
@@ -227,6 +445,8 @@ async function renderServiceLiveInfo(forceRefresh = false) {
       schedEl.textContent = `${datePrefix}Website says: "${live.infoAlert}"`;
       return;
     }
+  } else {
+    startServiceCountdown(mode, false, null);
   }
 
   const allRestricted = await fetchRestrictedDatesCached();
@@ -251,7 +471,7 @@ async function renderServiceLiveInfo(forceRefresh = false) {
     const isOpen = ist.hour >= 8;
     badge.className = 'window-badge';
     badge.textContent = isOpen ? '⏰ Window Active (8 AM+ IST)' : '⏰ Opens Today 8:00 AM IST';
-    schedEl.textContent = `Daily Tatkal Bhasma Aarti opens at 8:00 AM IST for day after tomorrow (₹200/person). Open page to check live quota${blockedNote}.`;
+    schedEl.textContent = `Daily Tatkal Bhasma Aarti opens at 8:00 AM IST for tomorrow's darshan (Free · ₹0). Open page to check live quota${blockedNote}.`;
   } else if (mode === 'sandhya_aarti') {
     const isOpen = mins >= 12 * 60 && mins < 18 * 60 + 30;
     badge.className = 'window-badge';
@@ -380,7 +600,7 @@ function renderPortalLauncher(liveStatus = null) {
   const isMatched = activeTabInfo.onPortal && activeTabInfo.detectedMode === vault.bookingMode;
 
   if (isMatched) {
-    if (liveStatus?.dangerAlert) {
+    if (liveStatus?.quotaFullAlert || liveStatus?.dangerAlert) {
       dot.className = 'status-dot closed';
       txt.textContent = `${MODE_LABELS[vault.bookingMode]} — Quota Full / Unavailable on Page`;
     } else if (liveStatus && !liveStatus.hasForm && liveStatus.infoAlert) {
@@ -413,20 +633,24 @@ function renderModeBar() {
 }
 
 function getDefaultTomorrowIso() {
-  const d = new Date(Date.now() + 24 * 60 * 60 * 1000);
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
-  return `${y}-${m}-${day}`;
+  const istTomorrow = new Date(Date.now() + (5.5 + 24) * 60 * 60 * 1000);
+  return istTomorrow.toISOString().slice(0, 10);
+}
+
+function getSheeghraMaxIso() {
+  const istMax = new Date(Date.now() + (5.5 + 15 * 24) * 60 * 60 * 1000);
+  return istMax.toISOString().slice(0, 10);
 }
 
 function renderSlotPrefs() {
-  const todayIso = new Date().toISOString().slice(0, 10);
+  const todayIso = getIstParts().iso;
+  const maxIso = getSheeghraMaxIso();
   const dateEl = $('sDate');
   if (!dateEl) return;
   dateEl.min = todayIso;
+  dateEl.max = maxIso;
   let prefDate = vault.bookingPrefs?.preferredDate || '';
-  if (!prefDate || prefDate < todayIso) {
+  if (!prefDate || prefDate < todayIso || prefDate > maxIso) {
     prefDate = getDefaultTomorrowIso();
   }
   dateEl.value = prefDate;
@@ -545,18 +769,69 @@ function renderContactForm() {
   $('cGotra').value = c.gotra || '';
 }
 
+function getAutoSelectedIds(devotees, existingSelectedIds, mode) {
+  const maxAllowed = getMaxPersonsForMode(mode);
+  const validIds = new Set((devotees || []).map((d) => d.id));
+  const cleaned = (existingSelectedIds || []).filter((id) => validIds.has(id)).slice(0, maxAllowed);
+  if (cleaned.length > 0 || !devotees || devotees.length === 0) {
+    return cleaned;
+  }
+  return devotees.slice(0, maxAllowed).map((d) => d.id);
+}
+
 function renderDevotees() {
   const listEl = $('devoteeList');
   const emptyEl = $('emptyDevotees');
+  const selBar = $('devoteeSelectionBar');
+  const selSummary = $('selectionSummary');
+  const batchBar = $('batchQuickBar');
+  const btnToggleAll = $('btnToggleSelectAll');
   const devotees = vault.devotees || [];
   const selectedSet = new Set(vault.selectedIds || []);
 
   const maxAllowed = getMaxPersonsForMode(vault.bookingMode);
+  const selectedCount = Math.min(maxAllowed, devotees.filter((d) => selectedSet.has(d.id)).length);
   $('devoteeCountBadge').textContent = String(devotees.length);
-  $('selectedCountLabel').textContent = String(
-    Math.min(maxAllowed, devotees.filter((d) => selectedSet.has(d.id)).length)
-  );
+  $('selectedCountLabel').textContent = String(selectedCount);
   if ($('maxPersonsLabel')) $('maxPersonsLabel').textContent = String(maxAllowed);
+
+  if (selBar && selSummary && btnToggleAll) {
+    if (devotees.length === 0) {
+      selBar.classList.add('hidden');
+    } else {
+      selBar.classList.remove('hidden');
+      const targetMax = Math.min(maxAllowed, devotees.length);
+      selSummary.textContent = `${selectedCount} of ${devotees.length} checked for autofill`;
+      btnToggleAll.textContent = selectedCount >= targetMax ? '☐ Uncheck All' : `☑ Select All (${targetMax})`;
+
+      if (batchBar) {
+        batchBar.innerHTML = '';
+        if (devotees.length > maxAllowed) {
+          batchBar.classList.remove('hidden');
+          const totalBatches = Math.ceil(devotees.length / maxAllowed);
+          for (let b = 0; b < totalBatches; b++) {
+            const start = b * maxAllowed;
+            const slice = devotees.slice(start, start + maxAllowed);
+            const isExactBatch =
+              slice.length === selectedCount && slice.every((d) => selectedSet.has(d.id));
+            const btn = document.createElement('button');
+            btn.type = 'button';
+            btn.className = `btn-batch${isExactBatch ? ' active' : ''}`;
+            btn.textContent = `Batch ${b + 1} (${start + 1}–${start + slice.length})`;
+            btn.title = `Select devotees ${start + 1} to ${start + slice.length} for this booking`;
+            btn.addEventListener('click', async () => {
+              vault.selectedIds = slice.map((d) => d.id);
+              vault = await saveVault(vault);
+              renderDevotees();
+            });
+            batchBar.appendChild(btn);
+          }
+        } else {
+          batchBar.classList.add('hidden');
+        }
+      }
+    }
+  }
 
   listEl.innerHTML = '';
   if (devotees.length === 0) {
@@ -773,6 +1048,7 @@ async function runFullBookingFill() {
     preferredSlot,
     contact: vault.contact,
     devotees: selected,
+    autoContinue: autoContinueEnabled,
   });
   if (!res.ok) {
     showStatus(res.error || 'Could not detect booking fields on this page.', 'err');
@@ -902,6 +1178,53 @@ function bindEvents() {
     renderServiceLiveInfo(true);
   });
 
+  $('btnReloadPortalTab')?.addEventListener('click', () => {
+    chrome.runtime.sendMessage({ type: 'RELOAD_ACTIVE_PORTAL_TAB' }, (r) => {
+      if (!chrome.runtime.lastError && r?.ok) {
+        showStatus('Reloading portal page...', 'info');
+        setTimeout(() => renderServiceLiveInfo(true), 1400);
+      } else {
+        showStatus(r?.error || 'Could not reload portal tab.', 'err');
+      }
+    });
+  });
+
+  $('chkAutoReload')?.addEventListener('change', (e) => {
+    autoReloadEnabled = Boolean(e.target.checked);
+    try {
+      localStorage.setItem('mahakalAutoReload', autoReloadEnabled ? '1' : '0');
+    } catch (_) {}
+    const isMatched = activeTabInfo.onPortal && activeTabInfo.detectedMode === vault.bookingMode;
+    if (isMatched) {
+      syncBackgroundWatcher(autoReloadEnabled, vault.bookingMode, false);
+      renderServiceLiveInfo(false);
+    }
+    showStatus(
+      autoReloadEnabled
+        ? 'Auto-reload armed: reloads at 8:00 AM and keeps retrying every 2s while Quota Full until form opens.'
+        : 'Auto-reload stopped.',
+      'info'
+    );
+  });
+
+  $('chkAutoContinue')?.addEventListener('change', (e) => {
+    autoContinueEnabled = Boolean(e.target.checked);
+    try {
+      localStorage.setItem('mahakalAutoContinue', autoContinueEnabled ? '1' : '0');
+    } catch (_) {}
+    const isMatched = activeTabInfo.onPortal && activeTabInfo.detectedMode === vault.bookingMode;
+    if (isMatched) {
+      syncBackgroundWatcher(autoReloadEnabled, vault.bookingMode, true);
+      syncOnPageTimerWidget(true, vault.bookingMode);
+    }
+    showStatus(
+      autoContinueEnabled
+        ? 'Auto-Fill & Continue enabled: fills devotees when form opens, waits for photo upload, and clicks Continue.'
+        : 'Auto-Continue disabled (manual Continue).',
+      'info'
+    );
+  });
+
   $('btnToggleLang').addEventListener('click', async () => {
     vault.lang = vault.lang === 'hi' ? 'en' : 'hi';
     vault = await saveVault(vault);
@@ -920,6 +1243,18 @@ function bindEvents() {
   $('btnFillMobile').addEventListener('click', runMobileOnlyFill);
   $('btnAddDevotee').addEventListener('click', () => openDevoteeModal(null));
   $('btnEmptyAdd').addEventListener('click', () => openDevoteeModal(null));
+  $('btnToggleSelectAll')?.addEventListener('click', async () => {
+    const devotees = vault.devotees || [];
+    const maxAllowed = getMaxPersonsForMode(vault.bookingMode);
+    const validSet = new Set(devotees.map((d) => d.id));
+    const currentCount = (vault.selectedIds || []).filter((id) => validSet.has(id)).length;
+    const targetMax = Math.min(maxAllowed, devotees.length);
+    vault.selectedIds = currentCount >= targetMax
+      ? []
+      : devotees.slice(0, maxAllowed).map((d) => d.id);
+    vault = await saveVault(vault);
+    renderDevotees();
+  });
   $('btnCloseModal').addEventListener('click', closeDevoteeModal);
   $('btnCancelModal').addEventListener('click', closeDevoteeModal);
 
@@ -965,9 +1300,13 @@ function bindEvents() {
       vault.devotees = vault.devotees.map((d) => (d.id === existingId ? record : d));
     } else {
       vault.devotees.push(record);
-      if (vault.selectedIds.length < MAX_PERSONS_PER_BOOKING) {
-        vault.selectedIds.push(record.id);
+      const validIds = new Set(vault.devotees.map((d) => d.id));
+      const cleanSelected = (vault.selectedIds || []).filter((id) => validIds.has(id));
+      const maxAllowed = getMaxPersonsForMode(vault.bookingMode);
+      if (cleanSelected.length < maxAllowed) {
+        cleanSelected.push(record.id);
       }
+      vault.selectedIds = cleanSelected;
     }
 
     vault = await saveVault(vault);
@@ -1053,13 +1392,13 @@ function bindEvents() {
       if (!parsed || !Array.isArray(parsed.devotees)) {
         throw new Error('Invalid Mahakal Autofill backup JSON.');
       }
+      const importedDevotees = parsed.devotees.slice(0, MAX_DEVOTEES);
+      const targetMode = parsed.bookingMode || vault.bookingMode;
       vault = await saveVault({
         contact: { ...vault.contact, ...(parsed.contact || {}) },
-        devotees: parsed.devotees.slice(0, MAX_DEVOTEES),
-        selectedIds: Array.isArray(parsed.selectedIds)
-          ? parsed.selectedIds
-          : parsed.devotees.slice(0, 4).map((d) => d.id),
-        bookingMode: parsed.bookingMode || vault.bookingMode,
+        devotees: importedDevotees,
+        selectedIds: getAutoSelectedIds(importedDevotees, parsed.selectedIds, targetMode),
+        bookingMode: targetMode,
       });
       renderModeBar();
       renderContactForm();
@@ -1074,8 +1413,29 @@ function bindEvents() {
 }
 
 (async function init() {
+  try {
+    autoReloadEnabled = localStorage.getItem('mahakalAutoReload') === '1';
+    autoContinueEnabled = localStorage.getItem('mahakalAutoContinue') === '1';
+  } catch (_) {}
+  try {
+    const wRes = await new Promise((resolve) => {
+      chrome.runtime.sendMessage({ type: 'GET_AUTO_WATCHER' }, (r) => {
+        if (chrome.runtime.lastError) return resolve(null);
+        resolve(r);
+      });
+    });
+    if (wRes?.ok && wRes.watcher) {
+      if (typeof wRes.watcher.autoReload === 'boolean') autoReloadEnabled = wRes.watcher.autoReload;
+      if (typeof wRes.watcher.autoFillAndContinue === 'boolean') autoContinueEnabled = wRes.watcher.autoFillAndContinue;
+    }
+  } catch (_) {}
   vault = await loadVault();
   await syncWithActivePortalTab();
+  const autoIds = getAutoSelectedIds(vault.devotees, vault.selectedIds, vault.bookingMode);
+  if (JSON.stringify(autoIds) !== JSON.stringify(vault.selectedIds || [])) {
+    vault.selectedIds = autoIds;
+    vault = await saveVault(vault);
+  }
   applyLanguage();
   renderModeBar();
   renderSlotPrefs();

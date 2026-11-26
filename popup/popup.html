@@ -79,6 +79,24 @@
             <span id="serviceReqSummary" class="req-summary"></span>
             <button type="button" id="btnRefreshServiceInfo" class="btn-mini-refresh hidden" title="Refresh live open dates">↻</button>
           </div>
+          <div id="serviceCountdownBar" class="countdown-bar hidden">
+            <div class="countdown-main">
+              <span id="countdownLabel" class="countdown-label">Opens in</span>
+              <span id="countdownTimer" class="countdown-digits">00m 00s</span>
+              <span id="countdownIstClock" class="countdown-clock">IST --:--:--</span>
+            </div>
+            <div class="countdown-actions">
+              <label id="lblAutoReload" class="auto-reload-toggle hidden" title="Auto-reload at 8:00 AM and keep retrying every 2s while Quota Full message is shown">
+                <input id="chkAutoReload" type="checkbox" />
+                <span>Auto-reload (8 AM / Quota)</span>
+              </label>
+              <label id="lblAutoContinue" class="auto-reload-toggle hidden" title="Automatically fill selected devotees when form opens, wait for photo uploads, and click Continue">
+                <input id="chkAutoContinue" type="checkbox" />
+                <span>Auto-Fill &amp; Continue</span>
+              </label>
+              <button type="button" id="btnReloadPortalTab" class="btn-mini-action hidden" title="Reload active portal tab to load form">↻ Reload</button>
+            </div>
+          </div>
           <div id="serviceScheduleText" class="live-schedule-text"></div>
         </div>
       </div>
@@ -93,6 +111,12 @@
       <p id="lblSafetyNote" class="safety-note">
         Sets Number of Persons + Slot first, then fills devotee details locally. Pauses for OTP, CAPTCHA &amp; payment.
       </p>
+
+      <div id="devoteeSelectionBar" class="selection-bar hidden">
+        <span id="selectionSummary" class="selection-summary"></span>
+        <div id="batchQuickBar" class="batch-bar hidden"></div>
+        <button type="button" id="btnToggleSelectAll" class="btn-link-inline">☑ Select All</button>
+      </div>
 
       <!-- Devotee List -->
       <div id="devoteeList" class="devotee-list"></div>

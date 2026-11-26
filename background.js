@@ -1,7 +1,679 @@
 // Mahakal Darshan Autofill — MV3 Service Worker
-// Minimal permissions (storage, activeTab, scripting) — 100% local, zero tracking.
+import { loadVault } from './lib/vault.js';
 
 const PORTAL_HOST_PATTERN = /(^|\.)(shrimahakaleshwar\.mp\.gov\.in|mponline\.gov\.in|mahakaleshwar\.mp\.gov\.in)$/i;
+const WATCHER_KEY = 'mahakalAutoWatcherV1';
+const pendingReloadTimers = new Map();
+
+const TIMED_WINDOWS = {
+  bhasma_aarti: { openHour: 8, openMinute: 0, closeHour: 24, closeMinute: 0 },
+  sandhya_aarti: { openHour: 12, openMinute: 0, closeHour: 18, closeMinute: 30 },
+  shayan_aarti: { openHour: 16, openMinute: 0, closeHour: 22, closeMinute: 0 },
+};
+
+function getWindowStateIst(mode) {
+  const win = TIMED_WINDOWS[mode] || TIMED_WINDOWS.bhasma_aarti;
+  const ist = new Date(Date.now() + 5.5 * 3600 * 1000);
+  const mins = ist.getUTCHours() * 60 + ist.getUTCMinutes();
+  const openMins = win.openHour * 60 + win.openMinute;
+  const closeMins = win.closeHour * 60 + win.closeMinute;
+  return { ...win, isOpen: mins >= openMins && mins < closeMins };
+}
+
+function getMaxPersonsForMode(mode) {
+  return mode === 'sheeghra_darshan' || mode === 'dharmshala' ? 6 : 5;
+}
+
+function detectPortalServiceFromUrl(urlStr) {
+  try {
+    const u = new URL(urlStr || '');
+    if (!PORTAL_HOST_PATTERN.test(u.hostname)) return null;
+    const full = (u.pathname + u.search).toLowerCase();
+    if (full.includes('sheeghra-darshan') || full.includes('shighra-darshan')) return 'sheeghra_darshan';
+    if (full.includes('bhasmaarti') && !full.includes('advance-bhasmaarti')) return 'bhasma_aarti';
+    if (full.includes('sandhya-aarti')) return 'sandhya_aarti';
+    if (full.includes('shayan-aarti')) return 'shayan_aarti';
+    return null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function isReloadableBookingRoute(urlStr) {
+  const mode = detectPortalServiceFromUrl(urlStr);
+  return mode === 'bhasma_aarti' || mode === 'sandhya_aarti' || mode === 'shayan_aarti';
+}
+
+function isWidgetSupportedRoute(urlStr) {
+  return detectPortalServiceFromUrl(urlStr) !== null;
+}
+
+const MODE_LABELS = {
+  sheeghra_darshan: 'Sheeghra Darshan',
+  bhasma_aarti: 'Tatkal Bhasma Aarti',
+  sandhya_aarti: 'Sandhya Aarti',
+  shayan_aarti: 'Shayan Aarti',
+};
+
+async function runFillFromVault(tabId, { mode = 'bhasma_aarti', batchIndex = null, autoContinue = false } = {}) {
+  const vault = await loadVault();
+  const devotees = vault.devotees || [];
+  if (devotees.length === 0) {
+    return { ok: false, error: 'No devotees saved in extension vault yet.' };
+  }
+  const maxAllowed = getMaxPersonsForMode(mode);
+  let selected;
+  if (typeof batchIndex === 'number' && batchIndex >= 0) {
+    selected = devotees.slice(batchIndex * maxAllowed, (batchIndex + 1) * maxAllowed);
+  } else {
+    const selectedSet = new Set(vault.selectedIds || []);
+    selected = devotees.filter((d) => selectedSet.has(d.id)).slice(0, maxAllowed);
+    if (selected.length === 0) {
+      selected = devotees.slice(0, maxAllowed);
+    }
+  }
+  if (selected.length === 0) {
+    return { ok: false, error: 'No devotees in selected batch.' };
+  }
+  return injectAndRun(tabId, {
+    action: 'FILL_BOOKING_FORM',
+    bookingMode: mode,
+    personCount: selected.length,
+    preferredDate: vault.bookingPrefs?.preferredDate || '',
+    preferredSlot: vault.bookingPrefs?.preferredSlot || '',
+    contact: vault.contact,
+    devotees: selected,
+    autoContinue: Boolean(autoContinue),
+  });
+}
+
+function getWatcher() {
+  return new Promise((resolve) => {
+    chrome.storage.local.get([WATCHER_KEY], (res) => {
+      resolve(res?.[WATCHER_KEY] || {
+        armed: false,
+        tabId: null,
+        mode: 'bhasma_aarti',
+        autoReload: false,
+        autoFillAndContinue: false,
+        retryMs: 2000,
+      });
+    });
+  });
+}
+
+function setWatcher(patch) {
+  return new Promise(async (resolve) => {
+    const prev = await getWatcher();
+    const next = { ...prev, ...patch };
+    chrome.storage.local.set({ [WATCHER_KEY]: next }, () => resolve(next));
+  });
+}
+
+function clearPendingReload(tabId) {
+  const existing = pendingReloadTimers.get(tabId);
+  if (existing) {
+    clearTimeout(existing);
+    pendingReloadTimers.delete(tabId);
+  }
+}
+
+async function inspectTabLiveStatus(tabId) {
+  const exec = await chrome.scripting.executeScript({
+    target: { tabId, allFrames: false },
+    func: () => {
+      const isVis = (el) => {
+        if (!el) return false;
+        const s = window.getComputedStyle(el);
+        if (s.display === 'none' || s.visibility === 'hidden' || s.opacity === '0') return false;
+        const r = el.getBoundingClientRect();
+        return r.width > 0 && r.height > 0;
+      };
+      const cleanText = (el) => String(el?.innerText || el?.textContent || '').replace(/\s+/g, ' ').trim();
+      const firstVisibleText = (selector) => {
+        for (const el of document.querySelectorAll(selector)) {
+          if (!isVis(el)) continue;
+          const t = cleanText(el);
+          if (t) return t;
+        }
+        return '';
+      };
+
+      const isLoading = Boolean(document.querySelector('.global-loader-overlay'));
+      const dangerAlert = firstVisibleText('.alert-danger, .alert.alert-danger, [class*="alert-danger"]');
+      const rawSuccess = firstVisibleText('.alert-success, .alert.alert-success');
+      let infoAlert = firstVisibleText('.alert-warning, .alert-info');
+      let quotaFullAlert = '';
+      let isRestricted = false;
+
+      for (const el of document.querySelectorAll('.alert-danger, .alert-success, .global-alert, p, strong, h5, h6')) {
+        if (!isVis(el)) continue;
+        const t = cleanText(el);
+        if (!t || t.length > 260) continue;
+        if (/quota\s+(?:for\s+.*?)?is\s+now\s+full|booking\s+slots\s+are\s+full|quota\s+not\s+available/i.test(t)) {
+          quotaFullAlert = t;
+          break;
+        }
+        if (/restricted\s+for\s+booking|date\s+is\s+restricted/i.test(t)) {
+          isRestricted = true;
+        }
+      }
+
+      // Tatkal Bhasma Aarti renders "Bhasmaarti Booking Quota for ... is now full." inside .alert-success!
+      const successAlert = quotaFullAlert && rawSuccess && rawSuccess.toLowerCase().includes('is now full')
+        ? ''
+        : rawSuccess;
+
+      if (!infoAlert) {
+        for (const p of document.querySelectorAll('p, h5, h6, div.alert')) {
+          if (!isVis(p)) continue;
+          const t = cleanText(p);
+          if (t.length >= 15 && t.length <= 220 && /(will be open on|booking is closed|booking is not allowed|slots are full|restricted for booking|booking opens at|booking window)/i.test(t)) {
+            infoAlert = t;
+            break;
+          }
+        }
+      }
+
+      let dateText = '';
+      for (const el of document.querySelectorAll('h5, h6, p, div, span')) {
+        if (!isVis(el)) continue;
+        const t = cleanText(el);
+        if (/^date of visit\s*:/i.test(t) && t.length <= 60) {
+          dateText = t;
+          break;
+        }
+      }
+
+      const hasForm = Array.from(
+        document.querySelectorAll('select[formcontrolname="no_of_persons"], .visitor_row, form select, form input:not([type="hidden"])')
+      ).some(isVis);
+
+      return {
+        ok: true,
+        hasForm,
+        isLoading,
+        quotaFullAlert,
+        isRestricted,
+        dangerAlert,
+        successAlert,
+        infoAlert,
+        dateText,
+      };
+    },
+  });
+  return exec?.[0]?.result || { ok: false };
+}
+
+async function injectTimerWidget(tabId, cfg) {
+  let totalDevotees = 0;
+  let maxAllowed = getMaxPersonsForMode(cfg.mode || 'bhasma_aarti');
+  let selectedCount = 0;
+  let initialBatch = -1;
+  if (cfg.enabled) {
+    try {
+      const vault = await loadVault();
+      const devotees = vault.devotees || [];
+      totalDevotees = devotees.length;
+      const selSet = new Set(vault.selectedIds || []);
+      const validSel = devotees.filter((d) => selSet.has(d.id)).slice(0, maxAllowed);
+      selectedCount = validSel.length > 0 ? validSel.length : Math.min(maxAllowed, totalDevotees);
+      if (totalDevotees > maxAllowed && validSel.length > 0) {
+        const firstIdx = devotees.findIndex((d) => d.id === validSel[0].id);
+        if (firstIdx >= 0) initialBatch = Math.floor(firstIdx / maxAllowed);
+      } else if (totalDevotees > maxAllowed) {
+        initialBatch = 0;
+      }
+    } catch (_) {}
+  }
+
+  return chrome.scripting.executeScript({
+    target: { tabId, allFrames: false },
+    args: [{
+      enabled: Boolean(cfg.enabled),
+      forceShow: Boolean(cfg.forceShow),
+      hasForm: Boolean(cfg.hasForm),
+      isTimed: cfg.isTimed !== false,
+      mode: String(cfg.mode || 'bhasma_aarti'),
+      label: String(cfg.label || MODE_LABELS[cfg.mode] || 'Tatkal Bhasma Aarti'),
+      targetHour: Number(cfg.targetHour ?? 8),
+      targetMinute: Number(cfg.targetMinute ?? 0),
+      targetSecond: Number(cfg.targetSecond ?? 0),
+      closeHour: Number(cfg.closeHour ?? 24),
+      closeMinute: Number(cfg.closeMinute ?? 0),
+      autoReload: Boolean(cfg.autoReload),
+      autoFillAndContinue: Boolean(cfg.autoFillAndContinue),
+      statusBanner: String(cfg.statusBanner || ''),
+      retrying: Boolean(cfg.retrying),
+      totalDevotees,
+      maxAllowed,
+      selectedCount,
+      initialBatch,
+    }],
+    func: (cfg) => {
+      const WIDGET_ID = 'mahakal-opening-timer';
+      const existing = document.getElementById(WIDGET_ID);
+      if (window.__mahakalTimerInterval) {
+        clearInterval(window.__mahakalTimerInterval);
+        window.__mahakalTimerInterval = null;
+      }
+      if (!cfg.enabled) {
+        if (existing) existing.remove();
+        return;
+      }
+      if (!cfg.forceShow && window.__mahakalWidgetDismissed) {
+        return;
+      }
+
+      const getIstNow = () => {
+        const nowMs = Date.now();
+        const ist = new Date(nowMs + 5.5 * 3600 * 1000);
+        return {
+          h: ist.getUTCHours(),
+          m: ist.getUTCMinutes(),
+          s: ist.getUTCSeconds(),
+          secsOfDay: ist.getUTCHours() * 3600 + ist.getUTCMinutes() * 60 + ist.getUTCSeconds(),
+        };
+      };
+
+      const fmtClock = (h, m, s) => {
+        const ap = h >= 12 ? 'PM' : 'AM';
+        const hh = String(h % 12 || 12).padStart(2, '0');
+        return `${hh}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')} ${ap} IST`;
+      };
+
+      const fmtRemaining = (remSec) => {
+        const total = Math.max(0, Math.ceil(remSec));
+        const hh = Math.floor(total / 3600);
+        const mm = Math.floor((total % 3600) / 60);
+        const ss = total % 60;
+        return hh > 0
+          ? `${String(hh).padStart(2, '0')}h ${String(mm).padStart(2, '0')}m ${String(ss).padStart(2, '0')}s`
+          : `${String(mm).padStart(2, '0')}m ${String(ss).padStart(2, '0')}s`;
+      };
+
+      const widget = existing || document.createElement('div');
+      widget.id = WIDGET_ID;
+      Object.assign(widget.style, {
+        position: 'fixed',
+        bottom: '18px',
+        right: '18px',
+        zIndex: '2147483647',
+        background: '#2b090d',
+        color: '#fef3c7',
+        border: `2px solid ${cfg.hasForm ? '#10b981' : cfg.retrying ? '#fb923c' : '#f59e0b'}`,
+        borderRadius: '12px',
+        padding: '10px 12px',
+        fontFamily: 'system-ui, -apple-system, Segoe UI, Roboto, sans-serif',
+        boxShadow: '0 12px 32px rgba(0, 0, 0, 0.35)',
+        minWidth: '280px',
+        maxWidth: '335px',
+      });
+
+      let batchHtml = '';
+      if (cfg.totalDevotees > cfg.maxAllowed) {
+        const totalBatches = Math.ceil(cfg.totalDevotees / cfg.maxAllowed);
+        const btns = [];
+        for (let b = 0; b < totalBatches; b++) {
+          const start = b * cfg.maxAllowed + 1;
+          const end = Math.min(cfg.totalDevotees, (b + 1) * cfg.maxAllowed);
+          const isAct = b === (cfg.initialBatch >= 0 ? cfg.initialBatch : 0);
+          btns.push(
+            `<button type="button" class="mk-batch-btn" data-batch="${b}" style="background:${isAct ? '#f59e0b' : '#461016'};color:${isAct ? '#1c1917' : '#fde68a'};border:1px solid #f59e0b;border-radius:6px;padding:2px 7px;font-size:10.5px;font-weight:800;cursor:pointer;">B${b + 1} (${start}-${end})</button>`
+          );
+        }
+        batchHtml = `<div id="mkBatchRow" style="display:flex;align-items:center;gap:4px;flex-wrap:wrap;margin-bottom:7px;">${btns.join('')}</div>`;
+      }
+
+      const fillCountLabel = cfg.selectedCount > 0 ? ` (${cfg.selectedCount})` : '';
+
+      widget.innerHTML = `
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:4px;">
+          <span style="font-size:11.5px;font-weight:800;color:#fde68a;">🔱 ${cfg.label}</span>
+          <button id="mkTimerClose" type="button" aria-label="Close timer" style="background:none;border:none;color:#fde68a;font-size:13px;cursor:pointer;padding:0 2px;">✕</button>
+        </div>
+        <div id="mkTimerValue" style="font-size:15.5px;font-weight:800;font-variant-numeric:tabular-nums;color:${cfg.hasForm ? '#6ee7b7' : '#ffffff'};margin-bottom:2px;">--m --s</div>
+        <div id="mkTimerSub" style="font-size:10.5px;color:#fcd34d;font-variant-numeric:tabular-nums;margin-bottom:7px;">IST --:--:--</div>
+        ${batchHtml}
+        <div style="display:flex;flex-direction:column;gap:4px;margin-bottom:8px;">
+          <label style="display:${cfg.isTimed ? 'inline-flex' : 'none'};align-items:center;gap:5px;font-size:11px;font-weight:600;color:#fef3c7;cursor:pointer;">
+            <input id="mkTimerAutoReload" type="checkbox" ${cfg.autoReload ? 'checked' : ''} style="accent-color:#f59e0b;cursor:pointer;" />
+            <span>Auto-reload (Open Time &amp; Quota Full)</span>
+          </label>
+          <label style="display:inline-flex;align-items:center;gap:5px;font-size:11px;font-weight:600;color:#fef3c7;cursor:pointer;">
+            <input id="mkTimerAutoContinue" type="checkbox" ${cfg.autoFillAndContinue ? 'checked' : ''} style="accent-color:#10b981;cursor:pointer;" />
+            <span>Auto-Fill &amp; Click Continue</span>
+          </label>
+        </div>
+        <div style="display:flex;align-items:center;justify-content:flex-end;gap:6px;flex-wrap:wrap;">
+          <button id="mkTimerStopBtn" type="button" style="background:#7f1d1d;color:#fecaca;border:1px solid #ef4444;border-radius:7px;padding:5px 9px;font-size:11px;font-weight:700;cursor:pointer;display:${cfg.retrying ? 'inline-block' : 'none'};">■ Stop</button>
+          <button id="mkTimerReloadBtn" type="button" style="background:#f59e0b;color:#1c1917;border:none;border-radius:7px;padding:5px 9px;font-size:11px;font-weight:800;cursor:pointer;">↻ Reload</button>
+          <button id="mkTimerFillBtn" type="button" style="background:#10b981;color:#052e16;border:none;border-radius:7px;padding:5px 11px;font-size:11.5px;font-weight:800;cursor:pointer;">⚡ Auto Fill${fillCountLabel}</button>
+        </div>
+      `;
+
+      if (!existing) document.body.appendChild(widget);
+
+      const valEl = widget.querySelector('#mkTimerValue');
+      const subEl = widget.querySelector('#mkTimerSub');
+      const chkReload = widget.querySelector('#mkTimerAutoReload');
+      const chkContinue = widget.querySelector('#mkTimerAutoContinue');
+      const stopBtn = widget.querySelector('#mkTimerStopBtn');
+      const reloadBtn = widget.querySelector('#mkTimerReloadBtn');
+      const fillBtn = widget.querySelector('#mkTimerFillBtn');
+      const closeBtn = widget.querySelector('#mkTimerClose');
+
+      let activeBatchIdx = cfg.initialBatch >= 0 ? cfg.initialBatch : null;
+      const updateFillBtnText = () => {
+        if (activeBatchIdx === null) {
+          fillBtn.textContent = `⚡ Auto Fill${fillCountLabel}`;
+        } else {
+          const start = activeBatchIdx * cfg.maxAllowed + 1;
+          const end = Math.min(cfg.totalDevotees, (activeBatchIdx + 1) * cfg.maxAllowed);
+          fillBtn.textContent = `⚡ Auto Fill (${end - start + 1})`;
+        }
+      };
+
+      widget.querySelectorAll('.mk-batch-btn').forEach((btn) => {
+        btn.addEventListener('click', () => {
+          activeBatchIdx = Number(btn.dataset.batch);
+          widget.querySelectorAll('.mk-batch-btn').forEach((b) => {
+            const act = Number(b.dataset.batch) === activeBatchIdx;
+            b.style.background = act ? '#f59e0b' : '#461016';
+            b.style.color = act ? '#1c1917' : '#fde68a';
+          });
+          updateFillBtnText();
+        });
+      });
+
+      const pushWatcherUpdate = (armed) => {
+        chrome.runtime.sendMessage({
+          type: 'SET_AUTO_WATCHER',
+          armed,
+          mode: cfg.mode,
+          autoReload: chkReload.checked,
+          autoFillAndContinue: chkContinue.checked,
+          skipImmediate: true,
+        }, () => { void chrome.runtime.lastError; });
+      };
+
+      chkReload.addEventListener('change', () => pushWatcherUpdate(chkReload.checked));
+      chkContinue.addEventListener('change', () => pushWatcherUpdate(chkReload.checked));
+      stopBtn.addEventListener('click', () => {
+        chkReload.checked = false;
+        pushWatcherUpdate(false);
+        stopBtn.style.display = 'none';
+        valEl.textContent = 'Auto-reload paused';
+        valEl.style.color = '#fde68a';
+      });
+      reloadBtn.addEventListener('click', () => window.location.reload());
+
+      let customFeedback = '';
+      fillBtn.addEventListener('click', () => {
+        fillBtn.disabled = true;
+        fillBtn.textContent = '⚡ Filling...';
+        chrome.runtime.sendMessage(
+          {
+            type: 'FILL_FROM_WIDGET',
+            mode: cfg.mode,
+            batchIndex: activeBatchIdx,
+            autoContinue: chkContinue.checked,
+          },
+          (res) => {
+            fillBtn.disabled = false;
+            updateFillBtnText();
+            if (chrome.runtime.lastError || !res?.ok) {
+              customFeedback = `⚠ ${res?.error || chrome.runtime.lastError?.message || 'Fill failed'}`;
+              valEl.textContent = customFeedback;
+              valEl.style.color = '#fca5a5';
+            } else {
+              customFeedback = res.continueClicked
+                ? `✅ Filled ${res.filledDevotees || ''} & Clicked Continue!`
+                : `✅ Filled ${res.filledDevotees || 0} devotee(s)!`;
+              valEl.textContent = customFeedback;
+              valEl.style.color = '#6ee7b7';
+            }
+          }
+        );
+      });
+
+      closeBtn.addEventListener('click', () => {
+        window.__mahakalWidgetDismissed = true;
+        if (window.__mahakalTimerInterval) clearInterval(window.__mahakalTimerInterval);
+        pushWatcherUpdate(false);
+        widget.remove();
+      });
+
+      const targetSecs = cfg.targetHour * 3600 + cfg.targetMinute * 60 + cfg.targetSecond;
+      const closeSecs = cfg.closeHour * 3600 + cfg.closeMinute * 60;
+      let triggeredOpenReload = false;
+
+      const tick = () => {
+        const now = getIstNow();
+        const diff = targetSecs - now.secsOfDay;
+        subEl.textContent = cfg.isTimed
+          ? `${fmtClock(now.h, now.m, now.s)} · Opens ${fmtClock(cfg.targetHour, cfg.targetMinute, cfg.targetSecond).replace(' IST', '')}`
+          : `${fmtClock(now.h, now.m, now.s)} · Max ${cfg.maxAllowed} persons`;
+        if (customFeedback) return;
+        if (cfg.statusBanner) {
+          valEl.textContent = cfg.statusBanner;
+          valEl.style.color = cfg.hasForm ? '#6ee7b7' : cfg.retrying ? '#fdba74' : '#ffffff';
+          return;
+        }
+        if (cfg.hasForm) {
+          valEl.textContent = '● Form Open — Ready to Fill!';
+          valEl.style.color = '#6ee7b7';
+          return;
+        }
+        if (diff > 0) {
+          valEl.textContent = `Opens in ${fmtRemaining(diff)}`;
+          valEl.style.color = '#ffffff';
+        } else if (now.secsOfDay >= closeSecs) {
+          const nextDiff = 24 * 3600 - now.secsOfDay + targetSecs;
+          valEl.textContent = `Next opens in ${fmtRemaining(nextDiff)}`;
+          valEl.style.color = '#ffffff';
+        } else {
+          valEl.textContent = '● OPEN NOW — Reload Page!';
+          valEl.style.color = '#6ee7b7';
+          widget.style.borderColor = '#10b981';
+          if (chkReload.checked && !triggeredOpenReload && diff <= 0 && diff > -15) {
+            triggeredOpenReload = true;
+            pushWatcherUpdate(true);
+            window.location.reload();
+          }
+        }
+      };
+      tick();
+      window.__mahakalTimerInterval = setInterval(tick, 250);
+    },
+  });
+}
+
+async function evaluateAndHandleArmedTab(tabId) {
+  clearPendingReload(tabId);
+  const watcher = await getWatcher();
+
+  let tab;
+  try {
+    tab = await chrome.tabs.get(tabId);
+  } catch (_) {
+    if (watcher.tabId === tabId) await setWatcher({ armed: false, tabId: null });
+    return;
+  }
+  const url = tab?.url || '';
+  if (!isWidgetSupportedRoute(url)) {
+    if (watcher.armed && watcher.tabId === tabId) {
+      await setWatcher({ armed: false });
+    }
+    await injectTimerWidget(tabId, { enabled: false }).catch(() => {});
+    return;
+  }
+
+  const routeMode = detectPortalServiceFromUrl(url) || watcher.mode || 'bhasma_aarti';
+  const isTimed = routeMode !== 'sheeghra_darshan';
+  const isArmedHere = Boolean(watcher.armed && watcher.tabId === tabId);
+
+  // Wait up to ~2.4s for Angular loader to settle after reload/navigation
+  let status = await inspectTabLiveStatus(tabId);
+  for (let i = 0; i < 8 && status?.isLoading && !status?.hasForm; i++) {
+    await new Promise((r) => setTimeout(r, 300));
+    status = await inspectTabLiveStatus(tabId);
+  }
+
+  const latest = await getWatcher();
+  const stillArmed = Boolean(isArmedHere && latest.armed && latest.tabId === tabId);
+
+  if (!isTimed) {
+    if (stillArmed) await setWatcher({ armed: false });
+    await injectTimerWidget(tabId, {
+      enabled: true,
+      isTimed: false,
+      hasForm: Boolean(status?.hasForm),
+      mode: routeMode,
+      autoReload: false,
+      autoFillAndContinue: latest.autoFillAndContinue,
+      statusBanner: status?.hasForm ? '● Sheeghra Form Ready — Click ⚡ Auto Fill!' : '● Pick Date on Calendar → ⚡ Auto Fill',
+      retrying: false,
+    });
+    return;
+  }
+
+  const win = getWindowStateIst(routeMode);
+
+  if (status?.hasForm && !status?.quotaFullAlert) {
+    if (stillArmed) await setWatcher({ armed: false });
+    let banner = '● Form Open — Click ⚡ Auto Fill!';
+    if (stillArmed && latest.autoFillAndContinue) {
+      const fillRes = await runFillFromVault(tabId, { mode: routeMode, autoContinue: true });
+      if (fillRes?.ok) {
+        banner = fillRes.continueClicked
+          ? `✅ Filled ${fillRes.filledDevotees || ''} & Clicked Continue!`
+          : `✅ Filled ${fillRes.filledDevotees || 0} devotee(s)!`;
+      }
+    }
+    await injectTimerWidget(tabId, {
+      enabled: true,
+      hasForm: true,
+      mode: routeMode,
+      targetHour: win.openHour,
+      targetMinute: win.openMinute,
+      closeHour: win.closeHour,
+      closeMinute: win.closeMinute,
+      autoReload: false,
+      autoFillAndContinue: latest.autoFillAndContinue,
+      statusBanner: banner,
+      retrying: false,
+    });
+    return;
+  }
+
+  if (!stillArmed) {
+    await injectTimerWidget(tabId, {
+      enabled: true,
+      mode: routeMode,
+      targetHour: win.openHour,
+      targetMinute: win.openMinute,
+      closeHour: win.closeHour,
+      closeMinute: win.closeMinute,
+      autoReload: false,
+      autoFillAndContinue: latest.autoFillAndContinue,
+      statusBanner: status?.quotaFullAlert ? '✕ Quota full on page — check Auto-reload' : '',
+      retrying: false,
+    });
+    return;
+  }
+
+  if (status?.isRestricted) {
+    await setWatcher({ armed: false });
+    await injectTimerWidget(tabId, {
+      enabled: true,
+      mode: routeMode,
+      targetHour: win.openHour,
+      targetMinute: win.openMinute,
+      closeHour: win.closeHour,
+      closeMinute: win.closeMinute,
+      autoReload: false,
+      autoFillAndContinue: latest.autoFillAndContinue,
+      statusBanner: '✕ Date restricted on portal',
+      retrying: false,
+    });
+    return;
+  }
+
+  const shouldRetry = latest.autoReload && (Boolean(status?.quotaFullAlert) || win.isOpen);
+
+  if (shouldRetry) {
+    const banner = status?.quotaFullAlert
+      ? '⏳ Quota full — retrying in 2s...'
+      : '⏳ Waiting for form — reloading in 2s...';
+    await injectTimerWidget(tabId, {
+      enabled: true,
+      mode: routeMode,
+      targetHour: win.openHour,
+      targetMinute: win.openMinute,
+      closeHour: win.closeHour,
+      closeMinute: win.closeMinute,
+      autoReload: true,
+      autoFillAndContinue: latest.autoFillAndContinue,
+      statusBanner: banner,
+      retrying: true,
+    });
+
+    const timer = setTimeout(async () => {
+      pendingReloadTimers.delete(tabId);
+      const curr = await getWatcher();
+      if (!curr.armed || curr.tabId !== tabId || !curr.autoReload) return;
+      try {
+        const currTab = await chrome.tabs.get(tabId);
+        if (isReloadableBookingRoute(currTab?.url)) {
+          await chrome.tabs.reload(tabId);
+        } else {
+          await setWatcher({ armed: false });
+        }
+      } catch (_) {}
+    }, latest.retryMs || 2000);
+    pendingReloadTimers.set(tabId, timer);
+  } else {
+    await injectTimerWidget(tabId, {
+      enabled: true,
+      mode: routeMode,
+      targetHour: win.openHour,
+      targetMinute: win.openMinute,
+      closeHour: win.closeHour,
+      closeMinute: win.closeMinute,
+      autoReload: latest.autoReload,
+      autoFillAndContinue: latest.autoFillAndContinue,
+    });
+  }
+}
+
+chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+  if (changeInfo.url) {
+    if (!isReloadableBookingRoute(changeInfo.url)) {
+      clearPendingReload(tabId);
+      getWatcher().then((w) => {
+        if (w.armed && w.tabId === tabId) setWatcher({ armed: false });
+      });
+    }
+    if (isWidgetSupportedRoute(changeInfo.url)) {
+      setTimeout(() => evaluateAndHandleArmedTab(tabId).catch(() => {}), 320);
+    } else {
+      injectTimerWidget(tabId, { enabled: false }).catch(() => {});
+    }
+    return;
+  }
+  if (changeInfo.status === 'complete') {
+    evaluateAndHandleArmedTab(tabId).catch(() => {});
+  }
+});
+
+chrome.tabs.onRemoved.addListener(async (tabId) => {
+  clearPendingReload(tabId);
+  const watcher = await getWatcher();
+  if (watcher.tabId === tabId) {
+    await setWatcher({ armed: false, tabId: null });
+  }
+});
 
 chrome.runtime.onUpdateAvailable.addListener((details) => {
   console.log('[MahakalAutofill] Update available:', details?.version);
@@ -252,6 +924,103 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
+  if (msg.type === 'RELOAD_ACTIVE_PORTAL_TAB') {
+    (async () => {
+      try {
+        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (!tab?.id || !PORTAL_HOST_PATTERN.test(new URL(tab.url || 'https://invalid').hostname)) {
+          return sendResponse({ ok: false, error: 'Active tab is not a Mahakaleshwar portal page.' });
+        }
+        await chrome.tabs.reload(tab.id);
+        return sendResponse({ ok: true });
+      } catch (err) {
+        return sendResponse({ ok: false, error: err?.message || 'Failed to reload tab.' });
+      }
+    })();
+    return true;
+  }
+
+  if (msg.type === 'GET_AUTO_WATCHER') {
+    (async () => {
+      const w = await getWatcher();
+      sendResponse({ ok: true, watcher: w });
+    })();
+    return true;
+  }
+
+  if (msg.type === 'SET_AUTO_WATCHER') {
+    (async () => {
+      try {
+        const tabId = msg.tabId || sender?.tab?.id || (await chrome.tabs.query({ active: true, currentWindow: true }))?.[0]?.id || null;
+        if (tabId) clearPendingReload(tabId);
+        const next = await setWatcher({
+          armed: Boolean(msg.armed && tabId),
+          tabId,
+          mode: msg.mode || 'bhasma_aarti',
+          autoReload: Boolean(msg.autoReload),
+          autoFillAndContinue: Boolean(msg.autoFillAndContinue),
+        });
+        if (!msg.skipImmediate && next.armed && tabId) {
+          evaluateAndHandleArmedTab(tabId).catch(() => {});
+        }
+        sendResponse({ ok: true, watcher: next });
+      } catch (err) {
+        sendResponse({ ok: false, error: err?.message || 'Failed to update watcher.' });
+      }
+    })();
+    return true;
+  }
+
+  if (msg.type === 'FILL_FROM_WIDGET') {
+    (async () => {
+      try {
+        const tabId = sender?.tab?.id || (await chrome.tabs.query({ active: true, currentWindow: true }))?.[0]?.id;
+        if (!tabId) return sendResponse({ ok: false, error: 'No active portal tab.' });
+        const result = await runFillFromVault(tabId, {
+          mode: msg.mode || 'bhasma_aarti',
+          batchIndex: typeof msg.batchIndex === 'number' ? msg.batchIndex : null,
+          autoContinue: Boolean(msg.autoContinue),
+        });
+        sendResponse(result || { ok: false, error: 'No response from page.' });
+      } catch (err) {
+        sendResponse({ ok: false, error: err?.message || 'Fill failed.' });
+      }
+    })();
+    return true;
+  }
+
+  if (msg.type === 'SYNC_PAGE_TIMER') {
+    (async () => {
+      try {
+        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (!tab?.id || !PORTAL_HOST_PATTERN.test(new URL(tab.url || 'https://invalid').hostname)) {
+          return sendResponse({ ok: false });
+        }
+        await injectTimerWidget(tab.id, {
+          enabled: Boolean(msg.enabled),
+          forceShow: true,
+          isTimed: msg.isTimed !== false,
+          hasForm: Boolean(msg.hasForm),
+          mode: msg.mode || 'bhasma_aarti',
+          label: msg.label || 'Tatkal Bhasma Aarti',
+          targetHour: msg.targetHour ?? 8,
+          targetMinute: msg.targetMinute ?? 0,
+          targetSecond: msg.targetSecond ?? 0,
+          closeHour: msg.closeHour ?? 24,
+          closeMinute: msg.closeMinute ?? 0,
+          autoReload: Boolean(msg.autoReload),
+          autoFillAndContinue: Boolean(msg.autoFillAndContinue),
+          statusBanner: msg.statusBanner || '',
+          retrying: Boolean(msg.retrying),
+        });
+        return sendResponse({ ok: true });
+      } catch (_) {
+        return sendResponse({ ok: false });
+      }
+    })();
+    return true;
+  }
+
   if (msg.type === 'READ_LIVE_PAGE_STATUS') {
     (async () => {
       try {
@@ -259,65 +1028,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         if (!tab?.id || !PORTAL_HOST_PATTERN.test(new URL(tab.url || 'https://invalid').hostname)) {
           return sendResponse({ ok: false });
         }
-        const exec = await chrome.scripting.executeScript({
-          target: { tabId: tab.id, allFrames: false },
-          func: () => {
-            const isVis = (el) => {
-              if (!el) return false;
-              const s = window.getComputedStyle(el);
-              if (s.display === 'none' || s.visibility === 'hidden' || s.opacity === '0') return false;
-              const r = el.getBoundingClientRect();
-              return r.width > 0 && r.height > 0;
-            };
-            const cleanText = (el) => String(el?.innerText || el?.textContent || '').replace(/\s+/g, ' ').trim();
-            const firstVisibleText = (selector) => {
-              for (const el of document.querySelectorAll(selector)) {
-                if (!isVis(el)) continue;
-                const t = cleanText(el);
-                if (t) return t;
-              }
-              return '';
-            };
-
-            const dangerAlert = firstVisibleText('.alert-danger, .alert.alert-danger, [class*="alert-danger"]');
-            const successAlert = firstVisibleText('.alert-success, .alert.alert-success');
-            let infoAlert = firstVisibleText('.alert-warning, .alert-info');
-            if (!infoAlert) {
-              for (const p of document.querySelectorAll('p, h5, h6, div.alert')) {
-                if (!isVis(p)) continue;
-                const t = cleanText(p);
-                if (t.length >= 15 && t.length <= 220 && /(will be open on|booking is closed|booking is not allowed|quota not available|slots are full|restricted for booking|booking opens at|booking window)/i.test(t)) {
-                  infoAlert = t;
-                  break;
-                }
-              }
-            }
-
-            let dateText = '';
-            for (const el of document.querySelectorAll('h5, h6, p, div, span')) {
-              if (!isVis(el)) continue;
-              const t = cleanText(el);
-              if (/^date of visit\s*:/i.test(t) && t.length <= 60) {
-                dateText = t;
-                break;
-              }
-            }
-
-            const hasForm = Array.from(
-              document.querySelectorAll('.visitor_row, form select, form input:not([type="hidden"])')
-            ).some(isVis);
-
-            return {
-              ok: true,
-              hasForm,
-              dangerAlert,
-              successAlert,
-              infoAlert,
-              dateText,
-            };
-          },
-        });
-        return sendResponse(exec?.[0]?.result || { ok: false });
+        const status = await inspectTabLiveStatus(tab.id);
+        return sendResponse(status);
       } catch (_) {
         return sendResponse({ ok: false });
       }
