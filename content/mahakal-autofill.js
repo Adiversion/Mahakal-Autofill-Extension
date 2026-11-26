@@ -28,7 +28,7 @@
       exclude: [/visit|booking|darshan|aarti/i],
     },
     age: {
-      attrs: [/\bage\b|txtage|devotee.?age|member.?age|yrs|years/i],
+      attrs: [/\bage\b|txtage|devotee.?age|member.?age|visitor.?age|yrs|years/i],
       labels: [/\bage\b|age\s*\(in\s*years\)|years/i],
       exclude: [/image|page|stage|message|village|package/i],
     },
@@ -48,7 +48,7 @@
       exclude: [/number|no\.|num|file|upload|image|photo/i],
     },
     idNumber: {
-      attrs: [/id.?proof.?number|aadhaar|aadhar|uidai|photo.?id.?number|id.?no|id.?num|id.?number|id.?proof.?no|proof.?no|proof.?id|document.?no|doc.?no|identity.?no|card.?no/i],
+      attrs: [/id.?proof.?number|idproofnum|aadhaar|aadhar|uidai|photo.?id.?number|id.?no|id.?num|id.?number|id.?proof.?no|proof.?no|proof.?id|document.?no|doc.?no|identity.?no|card.?no/i],
       labels: [/aadhaar|aadhar|id\s*(proof\s*)?(number|no)|document\s*(number|no)|identity\s*(number|no)|govt\.?\s*id\s*no/i],
       exclude: [/mobile|phone|pin|type|file|upload|image|photo/i],
     },
@@ -444,33 +444,45 @@
       finalVal = formatDateForInput(finalVal, el);
     }
 
-    // Set directly in isolated world first
-    try {
-      const proto = el.tagName === 'TEXTAREA'
-        ? HTMLTextAreaElement.prototype
-        : el.tagName === 'SELECT'
-          ? HTMLSelectElement.prototype
-          : HTMLInputElement.prototype;
-      const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
-      if (setter) setter.call(el, finalVal);
-      else el.value = finalVal;
-      el.dispatchEvent(new Event('input', { bubbles: true }));
-      el.dispatchEvent(new Event('change', { bubbles: true }));
-      el.dispatchEvent(new Event('blur', { bubbles: true }));
-    } catch (_) {}
+    // Fast path for Angular 19 (shrimahakaleshwar.mp.gov.in): native prototype setter + InputEvent/change/blur
+    // reaches Zone.js & Reactive Forms synchronously in <1ms with ZERO chrome.scripting.executeScript IPC round-trips!
+    const isModernAngular = Boolean(document.querySelector('app-root, [ng-version]'));
+    let mainApplied = false;
+    if (!isModernAngular) {
+      const selector = getUniqueSelector(el);
+      try {
+        const res = await new Promise((resolve) => {
+          chrome.runtime.sendMessage(
+            { type: 'MAIN_WORLD_SET_FIELD', selector, value: finalVal, isSelect },
+            (r) => resolve(r || null)
+          );
+        });
+        mainApplied = Boolean(res?.applied);
+      } catch (_) {}
+      el.removeAttribute('data-mahakal-fill-id');
+    }
 
-    // Mirror via MAIN-world dispatcher so React/AngularJS/jQuery controlled models stay in sync
-    const selector = getUniqueSelector(el);
-    try {
-      await new Promise((resolve) => {
-        chrome.runtime.sendMessage(
-          { type: 'MAIN_WORLD_SET_FIELD', selector, value: finalVal, isSelect },
-          () => resolve()
-        );
-      });
-    } catch (_) {}
+    if (!mainApplied) {
+      try {
+        el.focus();
+        const proto = el.tagName === 'TEXTAREA'
+          ? HTMLTextAreaElement.prototype
+          : el.tagName === 'SELECT'
+            ? HTMLSelectElement.prototype
+            : HTMLInputElement.prototype;
+        const setter = Object.getOwnPropertyDescriptor(proto, 'value')?.set;
+        if (setter) setter.call(el, finalVal);
+        else el.value = finalVal;
+        try {
+          el.dispatchEvent(new InputEvent('input', { bubbles: true, cancelable: true, inputType: 'insertText', data: String(finalVal) }));
+        } catch (_) {
+          el.dispatchEvent(new Event('input', { bubbles: true }));
+        }
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        el.dispatchEvent(new Event('blur', { bubbles: true }));
+      } catch (_) {}
+    }
 
-    el.removeAttribute('data-mahakal-fill-id');
     highlightElement(el);
     return true;
   }
@@ -589,16 +601,19 @@
       idScanFile: devotee.idScan,
     };
 
-    // Order idType BEFORE idNumber so portals that unlock/reset ID number on ID type change stay populated
-    const ordered = [...controls].sort((a, b) => {
-      const ka = classifyField(a);
-      const kb = classifyField(b);
-      if (ka === 'idType' && kb !== 'idType') return -1;
-      if (kb === 'idType' && ka !== 'idType') return 1;
-      return 0;
-    });
+    // Order photoFile FIRST (so /add_image HTTP uploads fly immediately in parallel at t=0ms!),
+    // then idType BEFORE idNumber (so Angular's idType change reset runs before idNumber is populated).
+    const fieldRank = (el) => {
+      const k = classifyField(el);
+      if (k === 'photoFile') return 0;
+      if (k === 'idType') return 1;
+      if (k === 'idNumber') return 3;
+      return 2;
+    };
+    const ordered = [...controls].sort((a, b) => fieldRank(a) - fieldRank(b));
 
     let count = 0;
+    let uploadedPhotos = 0;
     const filledRadioNames = new Set();
 
     for (const el of ordered) {
@@ -606,14 +621,24 @@
       if (!key || !(key in map) || !map[key]) continue;
       if (el.type === 'radio' && el.name && filledRadioNames.has(el.name)) continue;
 
+      // On Tatkal/Advance Bhasma, Sandhya & Shayan Aarti, /id_proof_types and /relations load asynchronously in ngOnInit.
+      // Wait briefly if options haven't populated yet during 8 AM / 12 PM / 4 PM rush!
+      if ((key === 'idType' || key === 'relation') && el.tagName === 'SELECT') {
+        const deadline = Date.now() + 2000;
+        while (Date.now() < deadline && matchSelectOption(el, map[key], key) === null) {
+          await sleep(50);
+        }
+      }
+
       const ok = await setControlValue(el, map[key], key);
       if (ok) {
         count++;
+        if (key === 'photoFile') uploadedPhotos++;
         if (el.type === 'radio' && el.name) filledRadioNames.add(el.name);
-        if (key === 'idType') await sleep(30);
+        if (key === 'idType' && !document.querySelector('app-root, [ng-version]')) await sleep(30);
       }
     }
-    return count;
+    return { count, uploadedPhotos };
   }
 
   async function fillContactDetails(contact, mobileOnly = false) {
@@ -633,10 +658,12 @@
 
     const controls = queryAllInteractiveControls(document.body);
     let count = 0;
+    let countryChanged = false;
     let stateChanged = false;
+    const deferredStateSelects = [];
     const deferredCitySelects = [];
 
-    // Pass 1: Fill country & state first (and all non-cascading fields)
+    // Pass 1: Fill country first, then non-cascading fields (deferring cascading Country->State & State->City selects)
     const priority = { country: 1, state: 2, mobile: 3, email: 4, gotra: 5, address: 6, pincode: 7, city: 8 };
     const ordered = [...controls].sort((a, b) => (priority[classifyField(a)] || 99) - (priority[classifyField(b)] || 99));
 
@@ -644,7 +671,27 @@
       const key = classifyField(el);
       if (!key || !(key in map) || !map[key]) continue;
 
-      if (key === 'city' && el.tagName === 'SELECT' && stateChanged) {
+      if (key === 'country' && el.tagName === 'SELECT') {
+        // Dharmshala loads /countries asynchronously on ngOnInit
+        const deadline = Date.now() + 1000;
+        while (Date.now() < deadline && matchSelectOption(el, map.country, 'country') === null) {
+          await sleep(100);
+        }
+        if (await setControlValue(el, map.country, 'country')) {
+          count++;
+          countryChanged = true;
+        }
+        continue;
+      }
+
+      if (key === 'state' && el.tagName === 'SELECT') {
+        if (countryChanged || matchSelectOption(el, map.state, 'state') === null) {
+          deferredStateSelects.push(el);
+          continue;
+        }
+      }
+
+      if (key === 'city' && el.tagName === 'SELECT' && (stateChanged || deferredStateSelects.length > 0)) {
         deferredCitySelects.push(el);
         continue;
       }
@@ -656,9 +703,22 @@
       }
     }
 
-    // Pass 2: Wait up to 900ms for cascading State -> District/City dropdown options to populate via AJAX
+    // Pass 2: Wait up to 1500ms for cascading Country -> State dropdown options to populate (e.g. Dharmshala /states?country_id=1)
+    for (const stateEl of deferredStateSelects) {
+      const deadline = Date.now() + 1500;
+      while (Date.now() < deadline) {
+        if (matchSelectOption(stateEl, map.state, 'state') !== null) break;
+        await sleep(120);
+      }
+      if (await setControlValue(stateEl, map.state, 'state')) {
+        count++;
+        stateChanged = true;
+      }
+    }
+
+    // Pass 3: Wait up to 1200ms for cascading State -> District/City dropdown options to populate via AJAX
     for (const cityEl of deferredCitySelects) {
-      const deadline = Date.now() + 900;
+      const deadline = Date.now() + 1200;
       while (Date.now() < deadline) {
         if (matchSelectOption(cityEl, map.city, 'city') !== null) break;
         await sleep(120);
@@ -721,24 +781,31 @@
 
   /**
    * Selects a matching AVAILABLE Sheeghra Darshan slot card (e.g. "Slot 06:00 AM To 07:00 AM")
-   * ONLY when the card shows AVAILABLE (never clicks Inactive / Full / 0 Available slots).
+   * ONLY when the card shows AVAILABLE (never clicks Inactive / Full / 0 Available / Not Available / .disabled slots).
    */
   async function selectAvailableSlotCardOnPage(preferredSlot, allowFirstFallback = false) {
     const targetNorm = cleanText(preferredSlot).toLowerCase().replace(/^slot\s+/i, '');
     if (!targetNorm && !allowFirstFallback) return null;
 
-    const availableCards = Array.from(
-      document.querySelectorAll('button, [role="button"], .slot-card, .card, div, li')
-    ).filter((el) => {
+    const isBookableCard = (el) => {
       if (!isVisible(el)) return false;
+      if (el.classList.contains('disabled') || el.hasAttribute('disabled')) return false;
       const txt = cleanText(el.textContent);
-      if (txt.length < 15 || txt.length > 220) return false;
+      if (txt.length < 15 || txt.length > 260) return false;
       const lower = txt.toLowerCase();
       if (!lower.includes('available')) return false;
-      return !/\b0\s*available\b|inactive|sold\s*out|unavailable/i.test(lower);
-    });
+      return !/\b0\s*available\b|\bnot\s*available\b|inactive|sold\s*out|unavailable/i.test(lower);
+    };
 
-    const leafAll = availableCards.filter((el) => !availableCards.some((other) => other !== el && el.contains(other)));
+    // Prioritize exact portal .slot-card containers first (avoids picking inner .slot-available when count >= 10000)
+    const directSlotCards = Array.from(document.querySelectorAll('.slot-card')).filter(isBookableCard);
+    let leafAll = directSlotCards;
+    if (leafAll.length === 0) {
+      const availableCards = Array.from(
+        document.querySelectorAll('button, [role="button"], .card, div, li')
+      ).filter(isBookableCard);
+      leafAll = availableCards.filter((el) => !availableCards.some((other) => other !== el && el.contains(other)));
+    }
     if (leafAll.length === 0) return null;
 
     let chosen = targetNorm
@@ -787,20 +854,13 @@
     } catch (_) {}
   }
 
-  async function waitForUploadsAndClickContinue(timeoutMs = 15000) {
-    // Allow Angular /add_image requests to toggle .global-loader-overlay
-    await sleep(450);
+  async function waitForUploadsAndClickContinue(timeoutMs = 15000, expectedPhotoCount = 0) {
+    // Minimal initial pause (80ms) for Angular FileReader + /add_image requests to fire; then poll every 50ms!
+    await sleep(expectedPhotoCount > 0 ? 80 : 40);
     const deadline = Date.now() + timeoutMs;
 
-    while (Date.now() < deadline) {
-      const loaderActive = Boolean(document.querySelector('.global-loader-overlay'));
-      const previewImgs = Array.from(document.querySelectorAll('.visitor_row .preview img')).filter(isVisible);
-      const allImagesUploaded = previewImgs.length === 0 || previewImgs.every((img) => {
-        const src = String(img.getAttribute('src') || img.src || '');
-        return src.length > 0 && !src.startsWith('data:');
-      });
-
-      const submitBtn = Array.from(
+    const findContinueBtn = () =>
+      Array.from(
         document.querySelectorAll('button[type="submit"][name="send"], form button[type="submit"], button.btn-primary, button.btn-continue')
       ).find((b) => {
         if (!isVisible(b)) return false;
@@ -808,29 +868,77 @@
         return txt === 'continue' || txt.includes('continue');
       });
 
-      if (!loaderActive && allImagesUploaded && submitBtn && !submitBtn.disabled) {
-        submitBtn.scrollIntoView({ behavior: 'smooth', block: 'center' });
-        await sleep(100);
-        submitBtn.click();
-        return { clicked: true };
+    const areAllPhotosReady = () => {
+      const previewImgs = Array.from(document.querySelectorAll('.visitor_row .preview img')).filter(isVisible);
+      if (expectedPhotoCount > 0 && previewImgs.length < expectedPhotoCount) return false;
+      return previewImgs.every((img) => {
+        const src = String(img.getAttribute('src') || img.src || '').trim();
+        return src.length > 0 && !src.startsWith('data:');
+      });
+    };
+
+    const areRequiredSelectsFilled = () => {
+      // Tatkal Bhasma initializes relationship_id to 0 with Validators.required (which Angular treats as truthy/valid!),
+      // so verify no visible required visitor <select> is still sitting on "Select" / 0 / empty before clicking Continue!
+      const selects = Array.from(
+        document.querySelectorAll('.visitor_row select[formcontrolname="relationship_id"], .visitor_row select[formcontrolname="id_proof_type_id"], .visitor_row select[formcontrolname="gender"]')
+      ).filter(isVisible);
+      return selects.every((sel) => {
+        const val = String(sel.value || '').trim();
+        const txt = cleanText(sel.selectedOptions?.[0]?.textContent || '').toLowerCase();
+        if (!val || val === '0' || /^0:\s*0$/.test(val) || /^0:\s*['"]?['"]?$/.test(val)) return false;
+        if (/^select\b|--/i.test(txt)) return false;
+        return true;
+      });
+    };
+
+    const detectQuotaDropBanner = () => {
+      if (document.querySelector('form')) return '';
+      for (const el of document.querySelectorAll('.alert-danger, .global-alert.alert-error')) {
+        if (!isVisible(el)) continue;
+        const t = cleanText(el.textContent);
+        if (/quota\s+not\s+available|slots\s+are\s+full|not\s+available/i.test(t)) return t;
+      }
+      return '';
+    };
+
+    while (Date.now() < deadline) {
+      const quotaDrop = detectQuotaDropBanner();
+      if (quotaDrop) {
+        return { clicked: false, reason: `Portal quota check failed: "${quotaDrop}" — try fewer devotees.` };
+      }
+      const loaderActive = Boolean(document.querySelector('.global-loader-overlay'));
+      const allImagesUploaded = areAllPhotosReady();
+      const selectsOk = areRequiredSelectsFilled();
+      const submitBtn = findContinueBtn();
+
+      if (!loaderActive && allImagesUploaded && selectsOk && submitBtn && !submitBtn.disabled) {
+        submitBtn.scrollIntoView({ behavior: 'instant', block: 'center' });
+        await sleep(30);
+        // Re-check once after brief settle in case a parallel /add_image or /check_aarti_quota toggled state
+        if (!document.querySelector('.global-loader-overlay') && areAllPhotosReady() && areRequiredSelectsFilled() && !submitBtn.disabled) {
+          submitBtn.click();
+          return { clicked: true };
+        }
       }
 
-      await sleep(150);
+      await sleep(50);
     }
 
-    // Fallback: only click Continue (never Pay/Back)
-    const finalBtn = Array.from(
-      document.querySelectorAll('button[type="submit"][name="send"], form button[type="submit"], button.btn-primary, button.btn-continue')
-    ).find((b) => {
-      if (!isVisible(b) || b.disabled) return false;
-      const txt = cleanText(b.textContent).toLowerCase();
-      return txt === 'continue' || txt.includes('continue');
-    });
-    if (!document.querySelector('.global-loader-overlay') && finalBtn) {
+    // Never click Continue if photos are still uploading or required selects are unselected
+    const finalBtn = findContinueBtn();
+    if (!document.querySelector('.global-loader-overlay') && areAllPhotosReady() && areRequiredSelectsFilled() && finalBtn && !finalBtn.disabled) {
       finalBtn.click();
       return { clicked: true };
     }
-    return { clicked: false, reason: 'Continue button stayed disabled or upload timed out.' };
+    return {
+      clicked: false,
+      reason: expectedPhotoCount > 0 && !areAllPhotosReady()
+        ? 'Photo upload did not complete in time — verify previews & click Continue manually.'
+        : !areRequiredSelectsFilled()
+          ? 'A required dropdown (Relation / ID Proof Type / Gender) is still unselected — verify & click Continue.'
+          : 'Continue button stayed disabled — verify required fields & click Continue manually.',
+    };
   }
 
   function inspectCurrentPage() {
@@ -893,9 +1001,9 @@
         if (msg.action === 'FILL_SINGLE_DEVOTEE') {
           const groups = detectDevoteeControlGroups();
           const target = groups.find(isControlGroupEmpty) || groups[0];
-          const devFilled = await fillDevoteeIntoControls(target, msg.devotee);
+          const devRes = await fillDevoteeIntoControls(target, msg.devotee);
           const contactFilled = await fillContactDetails(msg.contact, false);
-          const total = devFilled + contactFilled;
+          const total = devRes.count + contactFilled;
           if (total === 0) {
             return sendResponse({ ok: false, error: 'No matching devotee form fields found on this page.' });
           }
@@ -914,8 +1022,24 @@
           // STEP 1 (Sheeghra Darshan / Slot Booking): Set Number of Persons FIRST so Angular generates N visitor rows
           const personsSet = await setNumberOfPersonsOnPage(personCount);
 
-          // STEP 2: Select the user's chosen AVAILABLE time slot card (or first available on Sheeghra)
-          const selectedSlot = msg.preferredSlot || msg.bookingMode === 'sheeghra_darshan'
+          // On Sandhya/Shayan Aarti, changing no_of_persons triggers POST /check_aarti_quota; if quota is insufficient,
+          // Angular destroys <form> and renders .alert-danger ("Quota not available..."). Detect this immediately!
+          if (!document.querySelector('form')) {
+            for (const el of document.querySelectorAll('.alert-danger, .global-alert.alert-error')) {
+              if (!isVisible(el)) continue;
+              const t = cleanText(el.textContent);
+              if (/quota\s+not\s+available|slots\s+are\s+full|not\s+available/i.test(t)) {
+                const msgText = `Portal quota check failed: "${t}" — try fewer devotees.`;
+                showPageToast(msgText);
+                return sendResponse({ ok: false, personsSet, error: msgText });
+              }
+            }
+          }
+
+          // STEP 2: Only select a Sheeghra time slot card on Sheeghra / slot-booking screens (never leak cached slot to Aarti/Dharmshala)
+          const isSheeghraSlotScreen =
+            msg.bookingMode === 'sheeghra_darshan' || /slot-booking/i.test(location.pathname);
+          const selectedSlot = isSheeghraSlotScreen
             ? await selectAvailableSlotCardOnPage(msg.preferredSlot || '', msg.bookingMode === 'sheeghra_darshan')
             : null;
 
@@ -923,25 +1047,28 @@
           const groups = detectDevoteeControlGroups();
           let filledCount = 0;
           let filledDevotees = 0;
+          let expectedPhotoCount = 0;
 
           const countToFill = Math.min(devotees.length, groups.length);
           const hasCombobox = groups.slice(0, countToFill).some((g) => g.some(isCustomCombobox));
           if (hasCombobox) {
             for (let i = 0; i < countToFill; i++) {
-              const c = await fillDevoteeIntoControls(groups[i], devotees[i]);
-              if (c > 0) {
-                filledCount += c;
+              const res = await fillDevoteeIntoControls(groups[i], devotees[i]);
+              if (res.count > 0) {
+                filledCount += res.count;
                 filledDevotees++;
+                expectedPhotoCount += res.uploadedPhotos;
               }
             }
           } else {
-            const counts = await Promise.all(
+            const results = await Promise.all(
               Array.from({ length: countToFill }, (_, i) => fillDevoteeIntoControls(groups[i], devotees[i]))
             );
-            for (const c of counts) {
-              if (c > 0) {
-                filledCount += c;
+            for (const res of results) {
+              if (res.count > 0) {
+                filledCount += res.count;
                 filledDevotees++;
+                expectedPhotoCount += res.uploadedPhotos;
               }
             }
           }
@@ -966,7 +1093,7 @@
           if (filledCount === 0 && preParts.length > 0) {
             let continueResult = null;
             if (msg.autoContinue) {
-              continueResult = await waitForUploadsAndClickContinue(4500);
+              continueResult = await waitForUploadsAndClickContinue(4500, 0);
             }
             const slotSummary = continueResult?.clicked
               ? `Set ${preParts.join(' & ')} → Clicked Continue!`
@@ -985,12 +1112,17 @@
 
           const prefix = preParts.length > 0 ? `${preParts.join(' + ')} → ` : '';
           const skipped = devotees.length - countToFill;
-          const skippedNote = skipped > 0 ? ` (${skipped} skipped — add more rows on the portal first)` : '';
+          const hasExtraBedBtn = Boolean(document.querySelector('button.extra-bed-btn:not([disabled])'));
+          const skippedNote = skipped > 0
+            ? (hasExtraBedBtn
+              ? ` (${skipped} skipped — click + Extra Bed for 1 more guest if needed)`
+              : ` (${skipped} skipped — add more rows on the portal first)`)
+            : '';
 
           let continueResult = null;
           if (msg.autoContinue && filledCount > 0) {
             showPageToast(`${prefix}Filled ${filledDevotees} devotee(s) — waiting for photo uploads to click Continue...`);
-            continueResult = await waitForUploadsAndClickContinue(15000);
+            continueResult = await waitForUploadsAndClickContinue(15000, expectedPhotoCount);
           }
 
           const continueNote = continueResult

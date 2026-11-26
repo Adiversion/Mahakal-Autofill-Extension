@@ -182,3 +182,33 @@ general_darshan_slots?date=${t}`).subscribe(e=>{this.Time=(e?.data||[]).filter(i
 updateIdProofNumberValidation(t,e){let i=t.get("id_proof_number");if(i?.clearValidators(),i?.setValue(""),i?.updateValueAndValidity(),e&&e!=="0"&&e!==0){let a=this.proofValidation.getIdProofNumberValidators(e);i?.setValidators(a),i?.updateValueAndValidity()}}saveData(){let t=this.form.getRawValue();t.date_of_visit=(0,Iv.default)(this.date_of_visit).format("YYYY-MM-DD"),t.mobile_no=this.mobile_no,t.no_of_persons=this.no_of_persons,t.darshan_type_id=4,this.formMode=="Add"&&(this.appComponent.showLoader(),this.apiService.postPublicDataToServer("/advance_bhasmarti_bookings/v2",t).su
 ```
 
+## 6. Deep Aarti Rush Analysis (Tatkal Bhasma, Sandhya & Shayan Aarti)
+
+| Attribute | Tatkal Bhasma Aarti (`fm`) | Sandhya Aarti (`_m`) | Shayan Aarti (`vm`) |
+|---|---|---|---|
+| **Route** | `/services/bhasmaarti` (`canActivate:[na]`) | `/services/sandhya-aarti` (`canActivate:[na]`) | `/services/shayan-aarti` (`canActivate:[na]`) |
+| **Window (Local Clock)** | `>= 08:00` (for tomorrow; no close check on client) | `12:00 – 18:30` (same-day) | `16:00 – 22:00` (same-day) |
+| **Client Timer?** | No — `setAvailableDateAndCheck()` runs once in `ngOnInit()`; full reload at 8:00 AM required | No — `checkBookingTime()` runs once in `ngOnInit()`; full reload at 12:00 PM required | No — `checkBookingTime()` runs once in `ngOnInit()`; full reload at 4:00 PM required |
+| **Quota Endpoint** | `GET /bhasmarti_limit_check?start_date=TMRW&end_date=TMRW` (AES-256-GCM decrypted response) | `POST /check_aarti_quota` (`sandhya_aarti`, today, `no_of_persons`, AES-GCM decrypted; re-called on every `no_of_persons` change) | `POST /check_aarti_quota` (`shayan_aarti`, today, `no_of_persons`, AES-GCM decrypted; re-called on every `no_of_persons` change) |
+| **Loader on Quota API?** | **No** (`.global-loader-overlay` NOT shown; `bhasmarti_limits` starts as `{}`) | **No** (`quotaMessage` starts `""`) | **No** (`quotaMessage` starts `""`) |
+| **Global Toast Classes** | `.global-alert.alert-success` / `.global-alert.alert-error` (4s auto-hide) | Same | Same |
+| **Max Persons** | 5 (`[ngValue]="1..5"`) | 5 (`[value]="1..5"`) | 5 (`[value]="1..5"`) |
+| **Async Selects** | `GET /relations`, `GET /id_proof_types` | `GET /id_proof_types` | `GET /id_proof_types` |
+| **Form Validators** | `full_name` (`required`), `relationship_id` (default `0`, `required` — Angular treats `0` as valid!), `id_proof_type_id` (`proofTypeValidator`), `id_proof_number`, `image_url` (`required`) | `full_name` (`required`, `minLength(2)`, **`/^[A-Za-z\s]+$/`**), `age` (`1..120`, digits), `gender`, `id_proof_type_id`, `id_proof_number`, `image_url` | Identical to Sandhya Aarti |
+| **Anti-Autofill** | None | `appScrambleTarget` (`Wc`) randomizes `name`/`id` to `visitorName_xxxxx`, `visitorAge_xxxxx`, `idProofNum_xxxxx` | Same (`appScrambleTarget`) |
+| **Photo Upload Quirk** | `POST /add_image` has **no `.subscribe()` error callback** & `appComponent.loader` is a non-ref-counted boolean | Same | Same |
+| **Continue Button** | **Direct submit** → AES-GCM encrypt → `POST /bhasmarti_bookings/v2` → `receipt_url` or `/darshan-payment/:id` | **Review screen** (`showDetails=true`, `.box_round.darshan_dtl`) → **"Pay"** → `POST /visitors/v2` (`darshan_type_id: 21`) → `e_pass_url` or `/darshan-payment/:id` | **Review screen** (`showDetails=true`, `.box_round.darshan_dtl`) → **"Pay"** → `POST /visitors/v2` (`darshan_type_id: 20`) → `e_pass_url` or `/darshan-payment/:id` |
+| **Portal jQuery Quirk** | `portal-index.html` loads jQuery 3.7.1 globally; extension must NOT call `jQuery.trigger('change')` on Angular 19 pages or quota/row handlers fire twice | Same | Same |
+| **Login Redirect** | Unauthenticated visits redirect to `/services/login?returnUrl=%2Fbhasmaarti`; auth token stored in `localStorage.authToken` | Redirects to `/services/login?returnUrl=%2Fsandhya-aarti` | Redirects to `/services/login?returnUrl=%2Fshayan-aarti` |
+
+### Exact Live `ProofValidationService` (`Wc` in `chunk-5TUGH7WL.js`) & Live API Shapes
+- **Aadhaar (`id=1`)**: strips whitespace, requires `/^\d{12}$/` and rejects 12 repeated digits (`/^(\d)\1{11}$/`). Formatted live as `XXXX XXXX XXXX` (max 14 chars).
+- **Passport (`id=2`)**: uppercase alphanumeric max 8 chars, requires `/^[A-PR-WYa-pr-wy]{1,2}[0-9]{6,7}$/` (excludes `Q`, `X`, `Z`).
+- **Live `/check_aarti_quota` HTTP 400 shape**: `{"success":false,"status_code":400,"error":[{"message":"Slot not available for the selected date"}]}` (rendered directly in `.alert-danger`).
+- **Live `/relations` (10 items)**: `Father(1)`, `Mother(2)`, `Son(3)`, `Daughter(4)`, `Husband(5)`, `Wife(6)`, `Brother(7)`, `Sister(8)`, `Self(9)`, `Friends(10)`.
+- **Live `/id_proof_types` (2 items)**: `Aadhaar Card(1)`, `Passport(2)`.
+- **Live `/countries` (1 item)**: `India(1)`.
+- **Live `/restricted_dates` slugs**: `garbh_grha_darshan`, `general_bhasmaarti`, `sandhya_aarti`, `shayan_aarti`, `sheegra_darshan`.
+
+
+

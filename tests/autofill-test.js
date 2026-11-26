@@ -543,6 +543,347 @@ async function injectMockRuntime(page) {
     assert(v7.r0.name === 'Vikram Tiwari' && v7.r0.photo === 1 && v7.r0.rel === '1: 9' && v7.r0.idType === '1' && v7.r0.idNum === '555566667777', 'Bhasma row 0 failed', v7);
     assert(v7.r1.name === 'Kavita Tiwari' && v7.r1.photo === 1 && v7.r1.rel === '2: 6' && v7.r1.idType === '2' && v7.r1.idNum === 'K7654321', 'Bhasma row 1 failed', v7);
     console.log('TEST_7_PASS: Exact Tatkal/Advance Bhasma Aarti (no_of_persons [ngValue] + hidden photo input + Relation + ID Type->ID Number clear-safe) filled 100%!');
+
+    // TEST 8: Exact Dharmshala Step 2 (app-dharmshala-booking) — async /countries -> Country change -> async /states?country_id=1 -> State + text city + pin_code + email_id + visitor rows
+    const p8 = await browser.newPage();
+    await p8.setContent(`<!DOCTYPE html>
+      <html><body>
+        <form>
+          <div class="visitor_extra_dtl visitor_row">
+            <div class="form-field">
+              <select formcontrolname="no_of_persons" id="dhPersons"><option value="">Select</option><option value="1">1</option><option value="2">2</option></select>
+              <label>Number of Persons *</label>
+            </div>
+          </div>
+          <div class="visitor_extra_dtl visitor_row">
+            <div class="form-field"><input formcontrolname="email_id" type="email" id="dhEmail" /><label>Email *</label></div>
+            <div class="form-field">
+              <select formcontrolname="country_id" id="dhCountry"><option value="">Select Country</option></select>
+              <label>Country *</label>
+            </div>
+            <div class="form-field">
+              <select formcontrolname="state_id" id="dhState"><option value="">Select State</option></select>
+              <label>State *</label>
+            </div>
+            <div class="form-field"><input formcontrolname="city" type="text" id="dhCity" /><label>City Name *</label></div>
+            <div class="form-field"><input formcontrolname="pin_code" type="text" id="dhPin" /><label>Pincode *</label></div>
+          </div>
+          <button type="button" class="extra-bed-btn">Extra Bed</button>
+          <div formarrayname="visitors_basic_details" id="dhVisitors"></div>
+        </form>
+        <script>
+          function renderGuests(n) {
+            const box = document.getElementById('dhVisitors');
+            box.innerHTML = '';
+            for (let i = 0; i < n; i++) {
+              const row = document.createElement('div');
+              row.className = 'visitor_row';
+              row.innerHTML =
+                '<div class="form-field"><input formcontrolname="full_name" type="text" /><label>Name *</label></div>' +
+                '<div class="form-field"><input formcontrolname="age" type="number" /><label>Age *</label></div>' +
+                '<div class="form-field"><select formcontrolname="gender"><option value="">Select</option><option value="Male">Male</option><option value="Female">Female</option></select><label>Gender *</label></div>' +
+                '<div class="form-field"><select formcontrolname="id_proof_type_id"><option value="0">Select</option><option value="1">Aadhaar Card</option><option value="2">Passport</option></select><label>ID Proof Type *</label></div>' +
+                '<div class="form-field"><input formcontrolname="id_proof_number" type="text" /><label>ID Proof Number *</label></div>';
+              box.appendChild(row);
+            }
+          }
+          renderGuests(1);
+          document.getElementById('dhPersons').addEventListener('change', (e) => renderGuests(Number(e.target.value) || 1));
+          // Simulate async GET /countries after 120ms
+          setTimeout(() => {
+            document.getElementById('dhCountry').innerHTML =
+              '<option value="">Select Country</option><option value="1: 1">India</option><option value="2: 2">Nepal</option>';
+          }, 120);
+          // Simulate async GET /states?country_id=1 after 240ms when country changes
+          document.getElementById('dhCountry').addEventListener('change', (e) => {
+            if (e.target.value === '1: 1') {
+              setTimeout(() => {
+                document.getElementById('dhState').innerHTML =
+                  '<option value="">Select State</option><option value="1: 14">Madhya Pradesh</option><option value="2: 15">Maharashtra</option>';
+              }, 240);
+            }
+          });
+        </script>
+      </body></html>`);
+    await injectMockRuntime(p8);
+    const r8 = await p8.evaluate(() => new Promise((resolve) => {
+      window.__listeners[0](
+        {
+          action: 'FILL_BOOKING_FORM',
+          bookingMode: 'dharmshala',
+          personCount: 2,
+          contact: {
+            email: 'guest@example.com',
+            country: 'India',
+            state: 'Madhya Pradesh',
+            city: 'Ujjain',
+            pincode: '456001',
+          },
+          devotees: [
+            { name: 'Arjun Patel', age: '35', gender: 'Male', idType: 'Aadhaar Card', idNumber: '123412341234' },
+            { name: 'Ritu Patel', age: '32', gender: 'Female', idType: 'Aadhaar Card', idNumber: '987698769876' },
+          ],
+        },
+        {},
+        resolve
+      );
+    }));
+    const v8 = await p8.evaluate(() => ({
+      persons: document.getElementById('dhPersons').value,
+      email: document.getElementById('dhEmail').value,
+      country: document.getElementById('dhCountry').value,
+      state: document.getElementById('dhState').value,
+      city: document.getElementById('dhCity').value,
+      pin: document.getElementById('dhPin').value,
+      names: Array.from(document.querySelectorAll('#dhVisitors [formcontrolname="full_name"]')).map((x) => x.value),
+    }));
+    assert(r8.ok && v8.persons === '2' && v8.country === '1: 1' && v8.state === '1: 14' && v8.city === 'Ujjain' && v8.pin === '456001', 'Dharmshala cascading Country->State failed', v8);
+    assert(v8.names.join('|') === 'Arjun Patel|Ritu Patel', 'Dharmshala guest rows failed', v8);
+    console.log('TEST_8_PASS: Exact Dharmshala Step 2 (async Country -> async State cascade + City/PIN + 2 guests) filled 100%!');
+
+    // TEST 9: Exact Sandhya/Shayan Aarti with appScrambleTarget randomized name/id attributes (visitorName_xxx, visitorAge_xxx, idProofNum_xxx)
+    const p9 = await browser.newPage();
+    await p9.setContent(`<!DOCTYPE html>
+      <html><body>
+        <form>
+          <div class="visitor_row">
+            <div class="form-field"><input name="visitorName_k9x2a" id="visitorName_k9x2a" type="text" /><label>Name *</label></div>
+            <div class="photo-upload-box"><label><input type="file" hidden accept="image/*" /></label></div>
+            <div class="form-field"><input name="visitorAge_m3q7p" id="visitorAge_m3q7p" type="number" /><label>Age *</label></div>
+            <div class="form-field"><select formcontrolname="gender"><option value="">Select</option><option value="Male">Male</option><option value="Female">Female</option></select><label>Gender *</label></div>
+            <div class="form-field"><select formcontrolname="id_proof_type_id"><option value="0">Select</option><option value="1">Aadhaar Card</option></select><label>ID Proof Type *</label></div>
+            <div class="form-field"><input name="idProofNum_z4t8w" id="idProofNum_z4t8w" type="text" /><label>ID Proof Number *</label></div>
+          </div>
+        </form>
+      </body></html>`);
+    await injectMockRuntime(p9);
+    const r9 = await p9.evaluate((img) => new Promise((resolve) => {
+      window.__listeners[0](
+        {
+          action: 'FILL_BOOKING_FORM',
+          bookingMode: 'sandhya_aarti',
+          personCount: 1,
+          devotees: [
+            { name: 'Suresh Mishra', age: '45', gender: 'Male', idType: 'Aadhaar Card', idNumber: '222233334444', photo: { name: 's.jpg', type: 'image/png', dataUrl: img } },
+          ],
+        },
+        {},
+        resolve
+      );
+    }), TINY_IMG);
+    const v9 = await p9.evaluate(() => ({
+      name: document.getElementById('visitorName_k9x2a').value,
+      age: document.getElementById('visitorAge_m3q7p').value,
+      idNum: document.getElementById('idProofNum_z4t8w').value,
+      photoCount: document.querySelector('input[type="file"]').files.length,
+    }));
+    assert(r9.ok && v9.name === 'Suresh Mishra' && v9.age === '45' && v9.idNum === '222233334444' && v9.photoCount === 1, 'Sandhya/Shayan appScrambleTarget fill failed', v9);
+    console.log('TEST_9_PASS: Exact Sandhya/Shayan appScrambleTarget randomized inputs filled 100%!');
+
+    // TEST 10: Parallel photo upload gating on Auto-Continue (must NOT click Continue when photo 1 finishes while photo 2 is still uploading!)
+    const p10 = await browser.newPage();
+    await p10.setContent(`<!DOCTYPE html>
+      <html><body>
+        <form>
+          <div class="visitor_row" id="vr0">
+            <div class="form-field"><input formcontrolname="full_name" type="text" /><label>Name *</label></div>
+            <div class="photo-upload-box"><div class="preview" style="display:none"><img id="img0" /></div><label><input id="f0" type="file" hidden accept="image/*" /></label></div>
+          </div>
+          <div class="visitor_row" id="vr1">
+            <div class="form-field"><input formcontrolname="full_name" type="text" /><label>Name *</label></div>
+            <div class="photo-upload-box"><div class="preview" style="display:none"><img id="img1" /></div><label><input id="f1" type="file" hidden accept="image/*" /></label></div>
+          </div>
+          <button type="submit" name="send" class="btn btn-primary" id="btnCont">Continue</button>
+        </form>
+        <script>
+          window.__clickSnapshot = null;
+          function attachUpload(fileId, imgId, delayMs) {
+            document.getElementById(fileId).addEventListener('change', () => {
+              const img = document.getElementById(imgId);
+              img.parentElement.style.display = 'block';
+              img.setAttribute('src', 'data:image/jpeg;base64,abc');
+              setTimeout(() => {
+                img.setAttribute('src', 'https://prod-api.mahakal.brainabove.net/uploads/' + imgId + '.jpg');
+              }, delayMs);
+            });
+          }
+          attachUpload('f0', 'img0', 120);
+          attachUpload('f1', 'img1', 750);
+          document.getElementById('btnCont').addEventListener('click', (e) => {
+            e.preventDefault();
+            window.__clickSnapshot = {
+              img0: document.getElementById('img0').getAttribute('src'),
+              img1: document.getElementById('img1').getAttribute('src'),
+            };
+          });
+        </script>
+      </body></html>`);
+    await injectMockRuntime(p10);
+    const r10 = await p10.evaluate((img) => new Promise((resolve) => {
+      window.__listeners[0](
+        {
+          action: 'FILL_BOOKING_FORM',
+          bookingMode: 'bhasma_aarti',
+          personCount: 2,
+          autoContinue: true,
+          devotees: [
+            { name: 'Dev One', photo: { name: '1.jpg', type: 'image/png', dataUrl: img } },
+            { name: 'Dev Two', photo: { name: '2.jpg', type: 'image/png', dataUrl: img } },
+          ],
+        },
+        {},
+        resolve
+      );
+    }), TINY_IMG);
+    const snap10 = await p10.evaluate(() => window.__clickSnapshot);
+    assert(r10.ok && r10.continueClicked, 'Auto-Continue did not click Continue after all uploads finished', r10);
+    assert(snap10 && snap10.img0.startsWith('https://') && snap10.img1.startsWith('https://'), 'Auto-Continue clicked prematurely before both uploads resolved to https://!', snap10);
+    console.log('TEST_10_PASS: Parallel photo upload gating waited for ALL uploads to resolve before clicking Continue!');
+
+    // TEST 11: Sheeghra Darshan .slot-card with >=10000 Available + skipping .disabled / Not Available cards
+    const p11 = await browser.newPage();
+    await p11.setContent(`<!DOCTYPE html>
+      <html><body>
+        <div class="slot-grid">
+          <div class="slot-card disabled" id="sDisabled">
+            <div class="slot-notavailable">Not Available</div>
+            <div class="slot-info"><div class="slot-time">Slot 06:00 AM To 07:00 AM</div></div>
+          </div>
+          <div class="slot-card" id="sBig">
+            <div class="slot-available">12450<br><span>Available</span></div>
+            <div class="slot-info"><div class="slot-time">Slot 07:00 AM To 08:00 AM</div><div class="slot-person">1 Person</div><div class="slot-price">₹250</div></div>
+          </div>
+        </div>
+        <script>
+          document.querySelectorAll('.slot-card').forEach((card) => {
+            card.addEventListener('click', (e) => {
+              window.__clickedCard = card.id;
+              window.__clickedExact = e.target.className;
+            });
+          });
+        </script>
+      </body></html>`);
+    await injectMockRuntime(p11);
+    const r11 = await p11.evaluate(() => new Promise((resolve) => {
+      window.__listeners[0](
+        {
+          action: 'FILL_BOOKING_FORM',
+          bookingMode: 'sheeghra_darshan',
+          preferredSlot: '07:00 AM To 08:00 AM',
+          devotees: [{ name: 'Test User' }],
+        },
+        {},
+        resolve
+      );
+    }));
+    const v11 = await p11.evaluate(() => ({ card: window.__clickedCard, exact: window.__clickedExact }));
+    assert(r11.ok && v11.card === 'sBig' && v11.exact === 'slot-card', 'Slot card with >=10000 available or disabled card handling failed', { r11, v11 });
+    console.log('TEST_11_PASS: Sheeghra .slot-card (>=10000 available + skipping disabled/Not Available) clicked accurately!');
+
+    // TEST 12: Tatkal Bhasma Aarti async /relations & /id_proof_types loading AFTER form renders + Auto-Continue waiting for options & blocking placeholder select
+    const p12 = await browser.newPage();
+    await p12.setContent(`<!DOCTYPE html>
+      <html><body>
+        <form>
+          <div class="visitor_row">
+            <div class="form-field"><input formcontrolname="full_name" type="text" id="tbName" /><label>Name *</label></div>
+            <div class="photo-upload-box"><div class="preview" style="display:none"><img id="tbImg" /></div><label><input id="tbFile" type="file" hidden accept="image/*" /></label></div>
+            <div class="form-field"><select formcontrolname="relationship_id" id="tbRel"><option value="0: 0">Select</option></select><label>Relationship *</label></div>
+            <div class="form-field"><select formcontrolname="id_proof_type_id" id="tbIdType"><option value="0: 0">Select</option></select><label>ID Proof Type *</label></div>
+            <div class="form-field"><input formcontrolname="id_proof_number" type="text" id="tbIdNum" /><label>ID Proof Number *</label></div>
+          </div>
+          <button type="submit" name="send" class="btn btn-primary" id="tbCont">Continue</button>
+        </form>
+        <script>
+          window.__tbClicked = false;
+          // Simulate slow 8 AM rush: /relations and /id_proof_types arrive 260ms after form renders
+          setTimeout(() => {
+            document.getElementById('tbRel').innerHTML =
+              '<option value="0: 0">Select</option><option value="1: 9">Self</option><option value="2: 6">Wife</option>';
+            document.getElementById('tbIdType').innerHTML =
+              '<option value="0: 0">Select</option><option value="1: 1">Aadhaar Card</option><option value="2: 2">Passport</option>';
+          }, 260);
+          document.getElementById('tbFile').addEventListener('change', () => {
+            const img = document.getElementById('tbImg');
+            img.parentElement.style.display = 'block';
+            img.setAttribute('src', 'data:image/jpeg;base64,xyz');
+            setTimeout(() => img.setAttribute('src', 'https://prod-api.mahakal.brainabove.net/uploads/tb.jpg'), 200);
+          });
+          document.getElementById('tbCont').addEventListener('click', (e) => {
+            e.preventDefault();
+            window.__tbClicked = true;
+          });
+        </script>
+      </body></html>`);
+    await injectMockRuntime(p12);
+    const r12 = await p12.evaluate((img) => new Promise((resolve) => {
+      window.__listeners[0](
+        {
+          action: 'FILL_BOOKING_FORM',
+          bookingMode: 'bhasma_aarti',
+          personCount: 1,
+          autoContinue: true,
+          devotees: [
+            { name: 'Rohan Sharma', relation: 'Self', idType: 'Aadhaar Card', idNumber: '333344445555', photo: { name: 'r.jpg', type: 'image/png', dataUrl: img } },
+          ],
+        },
+        {},
+        resolve
+      );
+    }), TINY_IMG);
+    const v12 = await p12.evaluate(() => ({
+      rel: document.getElementById('tbRel').value,
+      idType: document.getElementById('tbIdType').value,
+      idNum: document.getElementById('tbIdNum').value,
+      clicked: window.__tbClicked,
+    }));
+    assert(r12.ok && r12.continueClicked && v12.rel === '1: 9' && v12.idType === '1: 1' && v12.idNum === '333344445555' && v12.clicked, 'Tatkal async /relations & /id_proof_types race failed', { r12, v12 });
+    console.log('TEST_12_PASS: Tatkal Bhasma Aarti waited for async /relations & /id_proof_types and clicked Continue cleanly!');
+
+    // TEST 13: Sandhya Aarti mid-fill quota drop (no_of_persons=5 fails /check_aarti_quota -> form removed & .alert-danger rendered)
+    const p13 = await browser.newPage();
+    await p13.setContent(`<!DOCTYPE html>
+      <html><body>
+        <div id="alertBox"></div>
+        <div id="formWrap">
+          <form>
+            <select formcontrolname="no_of_persons" id="saPersons">
+              <option value="1">1</option><option value="2">2</option><option value="5">5</option>
+            </select>
+            <div class="visitor_row">
+              <input formcontrolname="full_name" type="text" />
+            </div>
+            <button type="button" class="btn btn-primary">Continue</button>
+          </form>
+        </div>
+        <script>
+          document.getElementById('saPersons').addEventListener('change', (e) => {
+            if (e.target.value === '5') {
+              setTimeout(() => {
+                document.getElementById('formWrap').innerHTML = '';
+                document.getElementById('alertBox').innerHTML =
+                  '<div class="alert alert-danger">Quota not available for requested number of persons</div>';
+              }, 180);
+            }
+          });
+        </script>
+      </body></html>`);
+    await injectMockRuntime(p13);
+    const r13 = await p13.evaluate(() => new Promise((resolve) => {
+      window.__listeners[0](
+        {
+          action: 'FILL_BOOKING_FORM',
+          bookingMode: 'sandhya_aarti',
+          personCount: 5,
+          autoContinue: true,
+          devotees: [{ name: 'A' }, { name: 'B' }, { name: 'C' }, { name: 'D' }, { name: 'E' }],
+        },
+        {},
+        resolve
+      );
+    }));
+    assert(!r13.ok && /quota not available/i.test(r13.error || ''), 'Sandhya Aarti mid-fill quota drop was not detected cleanly', r13);
+    console.log('TEST_13_PASS: Sandhya Aarti mid-fill quota drop detected cleanly with actionable message!');
   } finally {
     await browser.close();
   }

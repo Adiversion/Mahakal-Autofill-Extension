@@ -7,6 +7,35 @@ const pendingReloadTimers = new Map();
 const tabLoadSeq = new Map();
 const autoFilledLoadKeys = new Map();
 const autoFilledBanners = new Map();
+let cachedClockSync = { offsetMs: 0, checkedAt: 0, ok: false };
+
+async function syncTempleServerClock(force = false) {
+  if (!force && cachedClockSync.ok && Date.now() - cachedClockSync.checkedAt < 60000) {
+    return cachedClockSync;
+  }
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 3500);
+    const t0 = Date.now();
+    const res = await fetch('https://prod-api.mahakal.brainabove.net/public/api/v1/id_proof_types', {
+      method: 'GET',
+      cache: 'no-store',
+      signal: controller.signal,
+    });
+    clearTimeout(timer);
+    const t1 = Date.now();
+    const dateHdr = res.headers.get('date');
+    if (dateHdr) {
+      const serverMs = Date.parse(dateHdr);
+      if (Number.isFinite(serverMs)) {
+        const localMid = Math.round((t0 + t1) / 2);
+        cachedClockSync = { offsetMs: serverMs - localMid, checkedAt: t1, ok: true };
+        return cachedClockSync;
+      }
+    }
+  } catch (_) {}
+  return cachedClockSync;
+}
 
 const TIMED_WINDOWS = {
   bhasma_aarti: { openHour: 8, openMinute: 0, openSecond: 0, closeHour: 24, closeMinute: 0 },
@@ -23,7 +52,13 @@ function getWindowStateIst(mode) {
   return {
     ...win,
     isOpen: secsOfDay >= openSecs && secsOfDay < closeSecs,
-    isOpeningRush: secsOfDay >= openSecs && secsOfDay < Math.min(closeSecs, openSecs + 120),
+    // 5-minute opening rush window (8:00–8:05 / 12:00–12:05 / 4:00–4:05) with precision sub-phases:
+    //   0–60s  (isUltraRush): 600ms retry after server responds
+    //   60–120s (isCriticalRush): 1000ms retry (Tatkal sells out in < 2 mins!)
+    //   120–300s (isOpeningRush): 1800ms retry for delayed openings
+    isOpeningRush: secsOfDay >= openSecs && secsOfDay < Math.min(closeSecs, openSecs + 300),
+    isCriticalRush: secsOfDay >= openSecs && secsOfDay < Math.min(closeSecs, openSecs + 120),
+    isUltraRush: secsOfDay >= openSecs && secsOfDay < Math.min(closeSecs, openSecs + 60),
     isBeforeOpen: secsOfDay < openSecs,
   };
 }
@@ -36,13 +71,18 @@ function detectPortalServiceFromUrl(urlStr) {
   try {
     const u = new URL(urlStr || '');
     if (!PORTAL_HOST_PATTERN.test(u.hostname)) return null;
-    const full = (u.pathname + u.search).toLowerCase();
-    if (full.includes('sheeghra-darshan') || full.includes('shighra-darshan')) return 'sheeghra_darshan';
-    if (full.includes('advance-bhasmaarti') || full.includes('bhasmaarti-request')) return 'advance_bhasma_aarti';
-    if (full.includes('bhasmaarti') || full.includes('bhasm-aarti')) return 'bhasma_aarti';
-    if (full.includes('sandhya-aarti')) return 'sandhya_aarti';
-    if (full.includes('shayan-aarti')) return 'shayan_aarti';
-    if (full.includes('dharmshala')) return 'dharmshala';
+    const path = u.pathname.toLowerCase();
+    // Never treat /services/login?returnUrl=%2Fbhasmaarti as an active booking route!
+    if (/(^|\/)login(\/|$)/.test(path)) return null;
+    const search = u.search.toLowerCase();
+    if (path.includes('sheeghra-darshan') || path.includes('shighra-darshan') || (path.includes('slot-booking') && (search.includes('sheeghra-darshan') || search.includes('shighra-darshan')))) {
+      return 'sheeghra_darshan';
+    }
+    if (path.includes('advance-bhasmaarti') || path.includes('bhasmaarti-request')) return 'advance_bhasma_aarti';
+    if (path.includes('bhasmaarti') || path.includes('bhasm-aarti')) return 'bhasma_aarti';
+    if (path.includes('sandhya-aarti')) return 'sandhya_aarti';
+    if (path.includes('shayan-aarti')) return 'shayan_aarti';
+    if (path.includes('dharmshala')) return 'dharmshala';
     return null;
   } catch (_) {
     return null;
@@ -159,19 +199,22 @@ async function inspectTabLiveStatus(tabId) {
       };
 
       const isLoading = Boolean(document.querySelector('.global-loader-overlay'));
-      const dangerAlert = firstVisibleText('.alert-danger, .alert.alert-danger, [class*="alert-danger"]');
+      const dangerAlert = firstVisibleText('.alert-danger, .alert.alert-danger, .global-alert.alert-error, .alert-error, [class*="alert-danger"]');
       const rawSuccess = firstVisibleText('.alert-success, .alert.alert-success');
       let infoAlert = firstVisibleText('.alert-warning, .alert-info');
       let quotaFullAlert = '';
+      let closedWindowAlert = '';
       let isRestricted = false;
 
-      for (const el of document.querySelectorAll('.alert-danger, .alert-success, .global-alert, p, strong, h5, h6')) {
+      for (const el of document.querySelectorAll('.alert-danger, .alert-error, .alert-success, .alert-warning, .global-alert, p, strong, h5, h6')) {
         if (!isVis(el)) continue;
         const t = cleanText(el);
         if (!t || t.length > 260) continue;
-        if (/quota\s+(?:for\s+.*?)?is\s+now\s+full|booking\s+slots\s+are\s+full|quota\s+not\s+available/i.test(t)) {
+        if (!quotaFullAlert && /quota\s+(?:for\s+.*?)?is\s+now\s+full|booking\s+slots\s+are\s+full|quota\s+not\s+available|slot\s+not\s+available/i.test(t)) {
           quotaFullAlert = t;
-          break;
+        }
+        if (!closedWindowAlert && /today's\s+booking\s+is\s+now\s+closed|booking\s+is\s+now\s+closed/i.test(t)) {
+          closedWindowAlert = t;
         }
         if (/restricted\s+for\s+booking|date\s+is\s+restricted/i.test(t)) {
           isRestricted = true;
@@ -187,7 +230,7 @@ async function inspectTabLiveStatus(tabId) {
         for (const p of document.querySelectorAll('p, h5, h6, div.alert')) {
           if (!isVis(p)) continue;
           const t = cleanText(p);
-          if (t.length >= 15 && t.length <= 220 && /(will be open on|booking is closed|booking is not allowed|slots are full|restricted for booking|booking opens at|booking window)/i.test(t)) {
+          if (t.length >= 15 && t.length <= 220 && /(will be open on|will start from|booking is closed|booking is now closed|booking is not allowed|slots are full|restricted for booking|booking opens at|booking window)/i.test(t)) {
             infoAlert = t;
             break;
           }
@@ -198,7 +241,7 @@ async function inspectTabLiveStatus(tabId) {
       for (const el of document.querySelectorAll('h5, h6, p, div, span')) {
         if (!isVis(el)) continue;
         const t = cleanText(el);
-        if (/^date of visit\s*:/i.test(t) && t.length <= 60) {
+        if (/^date of (?:visit|booking)\s*:/i.test(t) && t.length <= 80) {
           dateText = t;
           break;
         }
@@ -207,19 +250,22 @@ async function inspectTabLiveStatus(tabId) {
       const hasForm = Array.from(
         document.querySelectorAll('select[formcontrolname="no_of_persons"], .visitor_row, form select, form input:not([type="hidden"])')
       ).some(isVis);
-
-      const combinedAlert = `${quotaFullAlert} ${infoAlert} ${dangerAlert}`;
-      const soldOutForDay = Boolean(
-        !hasForm &&
-        /(will be open on .*? at \d+\s*(?:am|pm)|today's booking is now closed|booking is now closed)/i.test(combinedAlert)
+      const isReviewScreen = Boolean(
+        !hasForm && Array.from(document.querySelectorAll('.box_round.darshan_dtl')).some(isVis)
       );
+      let isLoggedIn = true;
+      try {
+        isLoggedIn = Boolean(localStorage.getItem('authToken') || localStorage.getItem('auth_token'));
+      } catch (_) {}
 
       return {
         ok: true,
         hasForm,
+        isReviewScreen,
+        isLoggedIn,
         isLoading,
         quotaFullAlert,
-        soldOutForDay,
+        closedWindowAlert,
         isRestricted,
         dangerAlert,
         successAlert,
@@ -229,6 +275,18 @@ async function inspectTabLiveStatus(tabId) {
     },
   });
   return exec?.[0]?.result || { ok: false };
+}
+
+function computeSoldOutForDay(mode, status, win = null) {
+  if (!status || status.hasForm) return false;
+  if (status.closedWindowAlert) return true;
+  if (!isTimedService(mode)) return false;
+  const w = win || getWindowStateIst(mode);
+  // Before opening time or during the 2-minute opening rush, NEVER treat static "will be open on ... at 8 AM"
+  // or initial empty-object quota banners as permanently sold out for the day!
+  if (w.isBeforeOpen || w.isOpeningRush) return false;
+  if (!w.isOpen) return true;
+  return Boolean(status.quotaFullAlert);
 }
 
 async function injectTimerWidget(tabId, cfg) {
@@ -253,6 +311,8 @@ async function injectTimerWidget(tabId, cfg) {
     } catch (_) {}
   }
 
+  const clockSync = cfg.isTimed !== false ? await syncTempleServerClock(false) : cachedClockSync;
+
   return chrome.scripting.executeScript({
     target: { tabId, allFrames: false },
     args: [{
@@ -272,6 +332,7 @@ async function injectTimerWidget(tabId, cfg) {
       autoContinue: Boolean(cfg.autoContinue ?? cfg.autoFillAndContinue),
       statusBanner: String(cfg.statusBanner || ''),
       retrying: Boolean(cfg.retrying),
+      clockOffsetMs: Number(clockSync?.offsetMs || 0),
       totalDevotees,
       maxAllowed,
       selectedCount,
@@ -431,7 +492,14 @@ async function injectTimerWidget(tabId, cfg) {
         });
       });
 
-      const pushWatcherUpdate = (armed) => {
+      const pushWatcherUpdate = (armed, onDone) => {
+        let settled = false;
+        const finish = () => {
+          if (settled) return;
+          settled = true;
+          if (typeof onDone === 'function') onDone();
+        };
+        if (typeof onDone === 'function') setTimeout(finish, 180);
         chrome.runtime.sendMessage({
           type: 'SET_AUTO_WATCHER',
           armed,
@@ -440,7 +508,10 @@ async function injectTimerWidget(tabId, cfg) {
           autoFill: chkAutoFill.checked,
           autoContinue: chkContinue.checked,
           skipImmediate: true,
-        }, () => { void chrome.runtime.lastError; });
+        }, () => {
+          void chrome.runtime.lastError;
+          finish();
+        });
       };
 
       chkReload.addEventListener('change', () => pushWatcherUpdate(chkReload.checked));
@@ -501,8 +572,12 @@ async function injectTimerWidget(tabId, cfg) {
       const tick = () => {
         const now = getIstNow();
         const diff = targetSecs - now.secsOfDay;
+        const driftSec = Math.round((cfg.clockOffsetMs || 0) / 1000);
+        const driftWarn = Math.abs(driftSec) >= 2
+          ? ` · ⚠ PC ${driftSec > 0 ? `${driftSec}s behind` : `${Math.abs(driftSec)}s ahead`}`
+          : '';
         subEl.textContent = cfg.isTimed
-          ? `${fmtClock(now.h, now.m, now.s)} · Opens ${fmtClock(cfg.targetHour, cfg.targetMinute, cfg.targetSecond).replace(' IST', '')}`
+          ? `${fmtClock(now.h, now.m, now.s)} · Opens ${fmtClock(cfg.targetHour, cfg.targetMinute, cfg.targetSecond).replace(' IST', '')}${driftWarn}`
           : `${fmtClock(now.h, now.m, now.s)} · Max ${cfg.maxAllowed} persons`;
         if (customFeedback) return;
         if (cfg.statusBanner) {
@@ -528,13 +603,12 @@ async function injectTimerWidget(tabId, cfg) {
           widget.style.borderColor = '#10b981';
           if (chkReload.checked && !triggeredOpenReload && diff <= 0 && diff > -15) {
             triggeredOpenReload = true;
-            pushWatcherUpdate(true);
-            window.location.reload();
+            pushWatcherUpdate(true, () => window.location.reload());
           }
         }
       };
       tick();
-      window.__mahakalTimerInterval = setInterval(tick, 250);
+      window.__mahakalTimerInterval = setInterval(tick, 50);
     },
   });
 }
@@ -561,15 +635,36 @@ async function evaluateAndHandleArmedTab(tabId) {
 
   const routeMode = detectPortalServiceFromUrl(url) || watcher.mode || 'bhasma_aarti';
   const isTimed = isTimedService(routeMode);
+  const win = isTimed ? getWindowStateIst(routeMode) : null;
   const isArmedHere = Boolean(watcher.armed && watcher.tabId === tabId);
   const currentLoadKey = `${url}#${tabLoadSeq.get(tabId) || 0}`;
 
-  // Wait up to ~2.4s for Angular loader to settle after reload/navigation
+  // Wait for Angular loader OR async quota APIs (/bhasmarti_limit_check, /check_aarti_quota) to respond.
+  // Angular does NOT show .global-loader-overlay during quota checks:
+  //  - On Tatkal Bhasma, when /bhasmarti_limit_check resolves as "full" or "restricted", Angular immediately pops
+  //    .global-alert.alert-error (dangerAlert) -> we break out in <=100ms!
+  //  - If the server is slow under 8 AM load (dangerAlert still empty & form not yet rendered), we wait up to ~4.5s
+  //    so we never prematurely reload over an in-flight request that is about to open the form!
   let status = await inspectTabLiveStatus(tabId);
-  for (let i = 0; i < 8 && status?.isLoading && !status?.hasForm; i++) {
-    await new Promise((r) => setTimeout(r, 300));
+  const pollMs = win?.isOpeningRush ? 100 : 250;
+  const maxPolls = win?.isOpeningRush ? 45 : 10;
+  for (let i = 0; i < maxPolls && !status?.hasForm && !status?.isReviewScreen; i++) {
+    const waitingForLoader = Boolean(status?.isLoading);
+    const waitingForQuotaApi = Boolean(
+      isTimed &&
+      win?.isOpen &&
+      !status?.isRestricted &&
+      !status?.closedWindowAlert &&
+      (routeMode === 'bhasma_aarti'
+        ? !status?.dangerAlert
+        : !status?.dangerAlert && !status?.quotaFullAlert)
+    );
+    if (!waitingForLoader && !waitingForQuotaApi) break;
+    await new Promise((r) => setTimeout(r, pollMs));
     status = await inspectTabLiveStatus(tabId);
   }
+  const soldOutForDay = computeSoldOutForDay(routeMode, status, win);
+  status = { ...status, soldOutForDay };
 
   const latest = await getWatcher();
   const stillArmed = Boolean(isArmedHere && latest.armed && latest.tabId === tabId);
@@ -606,8 +701,6 @@ async function evaluateAndHandleArmedTab(tabId) {
     });
     return;
   }
-
-  const win = getWindowStateIst(routeMode);
 
   if (status?.hasForm && !status?.quotaFullAlert) {
     if (stillArmed) await setWatcher({ armed: false });
@@ -652,7 +745,11 @@ async function evaluateAndHandleArmedTab(tabId) {
       autoReload: false,
       autoFill: latest.autoFill,
       autoContinue: latest.autoContinue,
-      statusBanner: status?.quotaFullAlert ? '✕ Quota full on page — check Auto-reload' : '',
+      statusBanner: status?.isRestricted
+        ? '✕ Date restricted on portal'
+        : status?.soldOutForDay
+          ? '✕ Quota full for today · Opens tomorrow'
+          : (win.isOpen && status?.quotaFullAlert ? '✕ Quota full on page — check Auto-reload' : ''),
       retrying: false,
     });
     return;
@@ -678,12 +775,14 @@ async function evaluateAndHandleArmedTab(tabId) {
     return;
   }
 
-  const shouldRetry = Boolean(latest.autoReload && win.isOpeningRush && !status?.hasForm);
+  const shouldRetry = Boolean(latest.autoReload && win.isOpeningRush && !status?.hasForm && !status?.isReviewScreen);
 
   if (shouldRetry) {
+    const retryDelayMs = win.isUltraRush ? 600 : win.isCriticalRush ? 1000 : (latest.retryMs || 1800);
+    const delayLabel = retryDelayMs < 1000 ? `${retryDelayMs}ms` : `${(retryDelayMs / 1000).toFixed(retryDelayMs % 1000 ? 1 : 0)}s`;
     const banner = status?.quotaFullAlert
-      ? '⏳ Quota full — retrying in 2s...'
-      : '⏳ Waiting for form — reloading in 2s...';
+      ? `⏳ Quota full — retrying in ${delayLabel}...`
+      : `⏳ Waiting for form — reloading in ${delayLabel}...`;
     await injectTimerWidget(tabId, {
       enabled: true,
       mode: routeMode,
@@ -705,12 +804,18 @@ async function evaluateAndHandleArmedTab(tabId) {
       try {
         const currTab = await chrome.tabs.get(tabId);
         if (isReloadableBookingRoute(currTab?.url)) {
+          // Final safety check: if a slow /bhasmarti_limit_check just opened the form during our wait, DO NOT reload over it!
+          const preCheck = await inspectTabLiveStatus(tabId).catch(() => null);
+          if (preCheck?.hasForm || preCheck?.isReviewScreen) {
+            evaluateAndHandleArmedTab(tabId).catch(() => {});
+            return;
+          }
           await chrome.tabs.reload(tabId);
         } else {
           await setWatcher({ armed: false });
         }
       } catch (_) {}
-    }, latest.retryMs || 2000);
+    }, retryDelayMs);
     pendingReloadTimers.set(tabId, timer);
   } else {
     const waitingOutsideRush = Boolean(latest.autoReload && win.isOpen && !win.isOpeningRush);
@@ -733,9 +838,22 @@ async function evaluateAndHandleArmedTab(tabId) {
   }
 }
 
-chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (changeInfo.status === 'loading') {
     tabLoadSeq.set(tabId, (tabLoadSeq.get(tabId) || 0) + 1);
+    // During timed Aarti opening rush, Angular often renders the booking form BEFORE slow external scripts
+    // (Razorpay, Google Fonts, GA) fire status==='complete'. Probe early at 450ms to shave 1-2s!
+    const url = changeInfo.url || tab?.url || '';
+    const mode = detectPortalServiceFromUrl(url);
+    if (mode && isTimedService(mode) && getWindowStateIst(mode).isOpeningRush) {
+      setTimeout(() => {
+        inspectTabLiveStatus(tabId)
+          .then((st) => {
+            if (st?.hasForm) evaluateAndHandleArmedTab(tabId).catch(() => {});
+          })
+          .catch(() => {});
+      }, 450);
+    }
   }
   if (changeInfo.url) {
     tabLoadSeq.set(tabId, (tabLoadSeq.get(tabId) || 0) + 1);
@@ -833,8 +951,10 @@ function mainWorldSetField(selector, value, isSelect) {
       if (typeof rp.onBlur === 'function') rp.onBlur(synth);
     }
 
-    // AngularJS / jQuery sync (common on MP govt portals)
-    if (window.angular && typeof window.angular.element === 'function') {
+    // AngularJS / jQuery sync ONLY on legacy non-Angular-19 pages (portal-index.html loads jQuery 3.7.1 alongside Angular 19,
+    // so calling jQuery.trigger here on Angular 19 would fire duplicate change events & duplicate /check_aarti_quota API calls!)
+    const isModernAngular = Boolean(document.querySelector('app-root, [ng-version]'));
+    if (!isModernAngular && window.angular && typeof window.angular.element === 'function') {
       try {
         const ngEl = window.angular.element(el);
         ngEl.triggerHandler('input');
@@ -844,14 +964,14 @@ function mainWorldSetField(selector, value, isSelect) {
           scope.$apply();
         }
       } catch (_) {}
-    } else if (window.jQuery) {
+    } else if (!isModernAngular && window.jQuery) {
       try {
         window.jQuery(el).trigger('input').trigger('change');
       } catch (_) {}
     }
 
     el.dispatchEvent(new Event('blur', { bubbles: true }));
-    return { ok: true, valueAfter: el.value };
+    return { ok: true, applied: true, valueAfter: el.value };
   } catch (err) {
     return { ok: false, reason: err?.message || String(err) };
   }
@@ -1101,6 +1221,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
+  if (msg.type === 'GET_SERVER_CLOCK_SYNC') {
+    (async () => {
+      const sync = await syncTempleServerClock(Boolean(msg.force));
+      sendResponse(sync);
+    })();
+    return true;
+  }
+
   if (msg.type === 'GET_AUTO_WATCHER') {
     (async () => {
       const w = await getWatcher();
@@ -1212,7 +1340,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           return sendResponse({ ok: false });
         }
         const status = await inspectTabLiveStatus(tab.id);
-        return sendResponse(status);
+        const mode = detectPortalServiceFromUrl(tab.url);
+        const soldOutForDay = computeSoldOutForDay(mode, status);
+        return sendResponse({ ...status, soldOutForDay });
       } catch (_) {
         return sendResponse({ ok: false });
       }

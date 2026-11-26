@@ -43,6 +43,7 @@ let cachedRestrictedDates = null;
 let cachedAdvanceBhasma = null;
 let cachedDharmshalaAvailability = null;
 let lastLivePageStatus = null;
+let serverClockDriftSec = 0;
 let countdownTimerId = null;
 let autoReloadEnabled = false;
 let autoFillEnabled = false;
@@ -231,10 +232,10 @@ function startServiceCountdown(mode, isMatched, liveStatus) {
 
     const openSec = state.win.openHour * 3600 + state.win.openMinute * 60 + state.win.openSecond;
     const nowSec = state.ist.hour * 3600 + state.ist.minute * 60 + state.ist.second;
-    const inOpeningRush = nowSec >= openSec && nowSec < openSec + 120;
+    const inOpeningRush = nowSec >= openSec && nowSec < openSec + 300;
     const nextOpenTomorrowSec = 24 * 3600 - nowSec + openSec;
 
-    if (isSoldOutForDay || (isQuotaFull && !inOpeningRush)) {
+    if (state.phase !== 'before_open' && (isSoldOutForDay || (isQuotaFull && !inOpeningRush))) {
       bar.classList.remove('ready');
       labelEl.textContent = 'Sold Out Today · Next opens in';
       digitsEl.textContent = formatCountdownDuration(nextOpenTomorrowSec);
@@ -284,7 +285,7 @@ function startServiceCountdown(mode, isMatched, liveStatus) {
     const initialState = getTimedWindowState(mode);
     const nowSec = initialState ? initialState.ist.hour * 3600 + initialState.ist.minute * 60 + initialState.ist.second : 0;
     const openSec = initialState ? initialState.win.openHour * 3600 + initialState.win.openMinute * 60 + initialState.win.openSecond : 0;
-    const inRushNow = Boolean(initialState && nowSec >= openSec && nowSec < openSec + 120);
+    const inRushNow = Boolean(initialState && nowSec >= openSec && nowSec < openSec + 300);
     const shouldRetryNow = Boolean(autoReloadEnabled && !isSoldOutForDay && !liveStatus?.isRestricted && inRushNow && !liveStatus?.hasForm);
     const shouldShowPageTimer = initialState && (initialState.phase === 'before_open' || !liveStatus?.hasForm);
     syncOnPageTimerWidget(Boolean(shouldShowPageTimer), mode, {
@@ -413,34 +414,35 @@ async function fetchAdvanceBhasmaOpenDates(forceRefresh = false) {
   if (!forceRefresh && cachedAdvanceBhasma) return cachedAdvanceBhasma;
 
   const nowIst = new Date(Date.now() + 5.5 * 60 * 60 * 1000);
-  const todayIso = nowIst.toISOString().slice(0, 10);
   const y = nowIst.getUTCFullYear();
   const m = nowIst.getUTCMonth();
-  const m0 = getMonthRange(y, m);
-  const m1 = getMonthRange(m === 11 ? y + 1 : y, (m + 1) % 12);
+  // Portal app-advance-bhasmaarti uses moment().add(1, "month") (mutating t in setDateRange),
+  // so its calendar strictly queries and enables next month only [1st..end of next month] (June is NOT blocked).
+  const nextMonth = getMonthRange(m === 11 ? y + 1 : y, (m + 1) % 12);
 
-  const fetchRange = (range) =>
-    new Promise((resolve) => {
-      chrome.runtime.sendMessage(
-        { type: 'FETCH_ADVANCE_BHASMA_DATES', startDate: range.start, endDate: range.end },
-        (r) => {
-          if (chrome.runtime.lastError) return resolve({ ok: false, days: [] });
-          resolve(r || { ok: false, days: [] });
-        }
-      );
-    });
+  const res = await new Promise((resolve) => {
+    chrome.runtime.sendMessage(
+      { type: 'FETCH_ADVANCE_BHASMA_DATES', startDate: nextMonth.start, endDate: nextMonth.end },
+      (r) => {
+        if (chrome.runtime.lastError) return resolve({ ok: false, days: [] });
+        resolve(r || { ok: false, days: [] });
+      }
+    );
+  });
 
-  // Portal Advance Bhasma calendar spans [current month .. end of next month], with June blocked
-  const [r0, r1] = await Promise.all([fetchRange(m0), fetchRange(m1)]);
-  const allDays = [...(r0.days || []), ...(r1.days || [])].filter(
-    (d) => String(d?.date || '') >= todayIso && String(d?.date || '').slice(5, 7) !== '06'
+  const allDays = (res.days || []).filter(
+    (d) => String(d?.date || '') >= nextMonth.start && String(d?.date || '') <= nextMonth.end
   );
-  const openDates = [...new Set(allDays.filter((d) => d.limit_available && !d.is_restricted).map((d) => String(d.date).slice(0, 10)))].sort();
-  const restrictedDates = [...new Set(allDays.filter((d) => d.is_restricted).map((d) => String(d.date).slice(0, 10)))].sort();
+  const openDates = [
+    ...new Set(allDays.filter((d) => d.limit_available && !d.is_restricted).map((d) => String(d.date).slice(0, 10))),
+  ].sort();
+  const restrictedDates = [
+    ...new Set(allDays.filter((d) => d.is_restricted).map((d) => String(d.date).slice(0, 10))),
+  ].sort();
 
   cachedAdvanceBhasma = {
-    ok: Boolean(r0.ok || r1.ok),
-    windowLabel: `${m0.label} – ${m1.label}`,
+    ok: Boolean(res.ok),
+    windowLabel: nextMonth.label,
     openDates,
     restrictedDates,
   };
@@ -568,6 +570,20 @@ async function renderServiceLiveInfo(forceRefresh = false) {
     renderPortalLauncher(live);
     startServiceCountdown(mode, true, live);
 
+    if (live?.isReviewScreen) {
+      badge.className = 'window-badge open';
+      badge.textContent = '● Review Details — Ready to Pay';
+      schedEl.textContent = 'All devotee details submitted to review screen. Verify & click Pay on the portal.';
+      return;
+    }
+    if (live?.isRestricted) {
+      badge.className = 'window-badge closed';
+      badge.textContent = '✕ Date Restricted on Portal';
+      const datePrefix = live.dateText ? `${live.dateText} · ` : '';
+      const alertMsg = live.dangerAlert || live.infoAlert || 'Selected date is restricted for booking.';
+      schedEl.textContent = `${datePrefix}Website says: "${alertMsg}"`;
+      return;
+    }
     if (live?.quotaFullAlert || live?.dangerAlert) {
       badge.className = 'window-badge closed';
       badge.textContent = live.soldOutForDay ? '✕ Sold Out Today (Opens Tomorrow)' : '✕ Quota Full / Not Available on Page';
@@ -673,35 +689,38 @@ function getSelectedDevotees() {
 }
 
 function detectPortalModeFromUrl(urlStr) {
-  if (!urlStr) return { onPortal: false, detectedMode: null };
+  if (!urlStr) return { onPortal: false, detectedMode: null, isLoginPage: false };
   try {
     const u = new URL(urlStr);
     const host = u.hostname.toLowerCase();
     const onPortal = /(^|\.)(shrimahakaleshwar\.mp\.gov\.in|mahakaleshwar\.mp\.gov\.in|mponline\.gov\.in)$/i.test(host);
-    if (!onPortal) return { onPortal: false, detectedMode: null };
+    if (!onPortal) return { onPortal: false, detectedMode: null, isLoginPage: false };
 
-    const full = (u.pathname + u.search).toLowerCase();
-    if (full.includes('sheeghra-darshan') || full.includes('shighra-darshan')) {
-      return { onPortal: true, detectedMode: 'sheeghra_darshan' };
+    const path = u.pathname.toLowerCase();
+    const search = u.search.toLowerCase();
+    const matchRoute = (s) => {
+      if (s.includes('sheeghra-darshan') || s.includes('shighra-darshan')) return 'sheeghra_darshan';
+      if (s.includes('advance-bhasmaarti') || s.includes('bhasmaarti-request')) return 'advance_bhasma_aarti';
+      if (s.includes('bhasmaarti') || s.includes('bhasm-aarti')) return 'bhasma_aarti';
+      if (s.includes('sandhya-aarti')) return 'sandhya_aarti';
+      if (s.includes('shayan-aarti')) return 'shayan_aarti';
+      if (s.includes('dharmshala')) return 'dharmshala';
+      return null;
+    };
+
+    if (/(^|\/)login(\/|$)/.test(path)) {
+      const returnUrl = u.searchParams.get('returnUrl') || '';
+      return { onPortal: true, detectedMode: null, isLoginPage: true, returnMode: matchRoute(returnUrl.toLowerCase()) };
     }
-    if (full.includes('advance-bhasmaarti') || full.includes('bhasmaarti-request')) {
-      return { onPortal: true, detectedMode: 'advance_bhasma_aarti' };
+
+    const fromPath = matchRoute(path);
+    if (fromPath) return { onPortal: true, detectedMode: fromPath, isLoginPage: false };
+    if (path.includes('slot-booking')) {
+      return { onPortal: true, detectedMode: matchRoute(search), isLoginPage: false };
     }
-    if (full.includes('bhasmaarti') || full.includes('bhasm-aarti')) {
-      return { onPortal: true, detectedMode: 'bhasma_aarti' };
-    }
-    if (full.includes('sandhya-aarti')) {
-      return { onPortal: true, detectedMode: 'sandhya_aarti' };
-    }
-    if (full.includes('shayan-aarti')) {
-      return { onPortal: true, detectedMode: 'shayan_aarti' };
-    }
-    if (full.includes('dharmshala')) {
-      return { onPortal: true, detectedMode: 'dharmshala' };
-    }
-    return { onPortal: true, detectedMode: null };
+    return { onPortal: true, detectedMode: null, isLoginPage: false };
   } catch (_) {
-    return { onPortal: false, detectedMode: null };
+    return { onPortal: false, detectedMode: null, isLoginPage: false };
   }
 }
 
@@ -712,12 +731,13 @@ async function syncWithActivePortalTab() {
     });
     const tab = tabs[0];
     const url = tab?.url || '';
-    const { onPortal, detectedMode } = detectPortalModeFromUrl(url);
-    activeTabInfo = { id: tab?.id || null, url, detectedMode, onPortal };
+    const { onPortal, detectedMode, isLoginPage, returnMode } = detectPortalModeFromUrl(url);
+    activeTabInfo = { id: tab?.id || null, url, detectedMode, onPortal, isLoginPage: Boolean(isLoginPage), returnMode: returnMode || null };
 
-    // Auto-switch the extension mode to match the open Mahakaleshwar page!
-    if (detectedMode && vault.bookingMode !== detectedMode) {
-      vault.bookingMode = detectedMode;
+    // Auto-switch the extension mode to match the open Mahakaleshwar page (or login returnUrl target)!
+    const targetMode = detectedMode || returnMode;
+    if (targetMode && vault.bookingMode !== targetMode) {
+      vault.bookingMode = targetMode;
       vault = await saveVault(vault);
     }
   } catch (_) {}
@@ -753,8 +773,18 @@ function renderPortalLauncher(liveStatus = null) {
   const t = I18N[vault.lang === 'hi' ? 'hi' : 'en'];
   const isMatched = activeTabInfo.onPortal && activeTabInfo.detectedMode === vault.bookingMode;
 
-  if (isMatched) {
-    if (liveStatus?.quotaFullAlert || liveStatus?.dangerAlert) {
+  if (activeTabInfo.isLoginPage) {
+    dot.className = 'status-dot closed';
+    txt.textContent = `🔒 Portal Login Required — click 📱 OTP`;
+    if (btnPortal) btnPortal.textContent = t.portalOk;
+  } else if (isMatched) {
+    if (liveStatus?.isReviewScreen) {
+      dot.className = 'status-dot connected';
+      txt.textContent = `${MODE_LABELS[vault.bookingMode]} — Review & Click Pay`;
+    } else if (liveStatus?.isRestricted) {
+      dot.className = 'status-dot closed';
+      txt.textContent = `${MODE_LABELS[vault.bookingMode]} — Date Restricted`;
+    } else if (liveStatus?.quotaFullAlert || liveStatus?.dangerAlert) {
       dot.className = 'status-dot closed';
       txt.textContent = `${MODE_LABELS[vault.bookingMode]} — Quota Full on Page`;
     } else if (liveStatus && !liveStatus.hasForm && liveStatus.infoAlert) {
@@ -878,7 +908,7 @@ function addDaysIso(isoStr, days) {
   return new Date(base + days * 86400000).toISOString().slice(0, 10);
 }
 
-// Mirrors portal's dayjs().add(1, "month") rule on Dharmshala calendar
+// Mirrors portal's moment().add(1, "month") rule on Dharmshala calendar
 function addOneMonthIso(isoStr) {
   const m = String(isoStr || '').match(/^(\d{4})-(\d{2})-(\d{2})/);
   if (!m) return addDaysIso(getIstParts().iso, 30);
@@ -1056,23 +1086,62 @@ const I18N = {
   },
 };
 
+const AGE_REQUIRED_MODES = new Set(['sheeghra_darshan', 'sandhya_aarti', 'shayan_aarti', 'dharmshala']);
+const ALPHA_NAME_MODES = new Set(['sheeghra_darshan', 'advance_bhasma_aarti', 'sandhya_aarti', 'shayan_aarti', 'dharmshala']);
+
 function renderReadinessLine() {
   const el = $('lblSafetyNote');
   if (!el) return;
   const t = I18N[vault.lang === 'hi' ? 'hi' : 'en'];
   const selected = getSelectedDevotees();
-  const needsPhoto = PHOTO_REQUIRED_MODES.has(vault.bookingMode);
+  const mode = vault.bookingMode;
+  const needsPhoto = PHOTO_REQUIRED_MODES.has(mode);
+  const needsAge = AGE_REQUIRED_MODES.has(mode);
+  const strictAlphaName = ALPHA_NAME_MODES.has(mode);
   const missingPhoto = needsPhoto ? selected.filter((d) => !d.photo?.dataUrl) : [];
+  const missingAge = needsAge ? selected.filter((d) => {
+    const n = Number(d.age);
+    return !d.age || !Number.isInteger(n) || n < 1 || n > 120;
+  }) : [];
+  const badNames = strictAlphaName ? selected.filter((d) => !/^[A-Za-z\s]{2,}$/.test(String(d.name || '').trim())) : [];
+  const badAadhaar = selected.filter((d) => {
+    if (d.idType !== 'Aadhaar Card') return false;
+    const digits = String(d.idNumber || '').replace(/\D/g, '');
+    return digits.length !== 12 || /^(\d)\1{11}$/.test(digits);
+  });
+  const badPassport = selected.filter((d) => {
+    if (d.idType !== 'Passport') return false;
+    const cleaned = String(d.idNumber || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+    return !/^[A-PR-WY]{1,2}[0-9]{6,7}$/.test(cleaned);
+  });
 
-  if (selected.length === 0) {
+  if (activeTabInfo.isLoginPage || lastLivePageStatus?.isLoggedIn === false) {
+    el.className = 'readiness-line warn';
+    el.textContent = '🔒 Log in on portal BEFORE opening time (click 📱 OTP to fill mobile).';
+  } else if (Math.abs(serverClockDriftSec) >= 2 && TIMED_OPENING_WINDOWS[mode]) {
+    el.className = 'readiness-line warn';
+    el.textContent = `⚠ PC clock is ${Math.abs(serverClockDriftSec)}s ${serverClockDriftSec > 0 ? 'behind' : 'ahead of'} temple server — sync Windows clock before rush!`;
+  } else if (selected.length === 0) {
     el.className = 'readiness-line warn';
     el.textContent = t.emptySelect;
   } else if (missingPhoto.length > 0) {
     el.className = 'readiness-line warn';
     el.textContent = t.missingPhoto(missingPhoto.length);
+  } else if (missingAge.length > 0) {
+    el.className = 'readiness-line warn';
+    el.textContent = `⚠ Age (1–120) required for ${MODE_LABELS[mode]}: ${missingAge.map((d) => d.name).join(', ')}`;
+  } else if (badNames.length > 0) {
+    el.className = 'readiness-line warn';
+    el.textContent = `⚠ Portal allows letters & spaces only in Name (no dots/digits): ${badNames.map((d) => d.name).join(', ')}`;
+  } else if (badAadhaar.length > 0) {
+    el.className = 'readiness-line warn';
+    el.textContent = `⚠ Invalid Aadhaar (12 digits, non-repeating): ${badAadhaar.map((d) => d.name).join(', ')}`;
+  } else if (badPassport.length > 0) {
+    el.className = 'readiness-line warn';
+    el.textContent = `⚠ Invalid Passport (e.g. A1234567, no Q/X/Z): ${badPassport.map((d) => d.name).join(', ')}`;
   } else {
     el.className = 'readiness-line ready';
-    el.textContent = vault.bookingMode === 'bhasma_aarti'
+    el.textContent = mode === 'bhasma_aarti'
       ? t.readyFree(selected.length, autoFillEnabled, autoContinueEnabled)
       : t.readyDefault(selected.length, autoFillEnabled, autoContinueEnabled);
   }
@@ -1592,9 +1661,10 @@ function bindEvents() {
       syncBackgroundWatcher(autoReloadEnabled, vault.bookingMode, false);
       renderServiceLiveInfo(false);
     }
+    const winLabel = TIMED_OPENING_WINDOWS[vault.bookingMode]?.label || 'opening time';
     showStatus(
       autoReloadEnabled
-        ? 'Auto-reload armed: reloads at 8:00 AM and keeps retrying every 2s while Quota Full until form opens.'
+        ? `Auto-reload armed: reloads at ${winLabel} and retries every 2s during opening rush until form opens.`
         : 'Auto-reload stopped.',
       'info'
     );
@@ -1857,4 +1927,10 @@ function bindEvents() {
     fetchLiveSheeghraSlots($('sDate').value, true);
   }
   loadOptionalRemoteAd();
+  chrome.runtime.sendMessage({ type: 'GET_SERVER_CLOCK_SYNC' }, (r) => {
+    if (!chrome.runtime.lastError && r?.ok) {
+      serverClockDriftSec = Math.round((r.offsetMs || 0) / 1000);
+      renderReadinessLine();
+    }
+  });
 })();
