@@ -125,9 +125,13 @@
           </div>
         </div>
 
-        <!-- Automation Toggles (Independent Auto-Reload, Auto-Fill, Auto-Continue) -->
+        <!-- Automation Toggles (Independent Auto-Reload, Auto-Fill, Auto-Continue, 5m Reminder) -->
         <div id="automationControls" class="automation-row hidden">
-          <label id="lblAutoReload" class="toggle-chip hidden" title="Auto-reload at opening time and retry every 2s while Quota Full">
+          <label id="lblReminder" class="toggle-chip hidden" title="Notify &amp; show reminder widget 5 minutes before opening time (7:55 AM / 11:55 AM / 3:55 PM IST)">
+            <input id="chkReminder" type="checkbox" />
+            <span id="txtReminder">🔔 5m Alert</span>
+          </label>
+          <label id="lblAutoReload" class="toggle-chip hidden" title="Auto-reload at opening time and retry while Quota Full">
             <input id="chkAutoReload" type="checkbox" />
             <span id="txtAutoReload">Auto-reload (2s)</span>
           </label>
@@ -135,7 +139,7 @@
             <input id="chkAutoFill" type="checkbox" />
             <span id="txtAutoFill">Auto-Fill</span>
           </label>
-          <label id="lblAutoContinue" class="toggle-chip" title="Automatically click Continue after autofill & photo upload">
+          <label id="lblAutoContinue" class="toggle-chip" title="Automatically click Continue after autofill &amp; photo upload">
             <input id="chkAutoContinue" type="checkbox" />
             <span id="txtAutoContinue">Auto-Continue</span>
           </label>
@@ -261,6 +265,14 @@
 
     <!-- TAB 3: TOOLS & BACKUP -->
     <section id="tab-tools" class="tab-panel">
+      <div class="tool-card">
+        <h3>🔔 5-Minute Aarti Reminder Alert</h3>
+        <p>Get a desktop notification + pulsing portal widget chime 5 minutes before Tatkal Bhasma (7:55 AM), Sandhya (11:55 AM), or Shayan Aarti (3:55 PM IST).</p>
+        <div class="btn-row">
+          <button id="btnTestReminder" class="btn-secondary">🔔 Test 5m Reminder Now</button>
+        </div>
+      </div>
+
       <div class="tool-card">
         <h3>🔍 Portal Form Inspector</h3>
         <p>Inspect the currently open Mahakaleshwar page to see detected input fields and copy a field report if the portal changes its layout.</p>

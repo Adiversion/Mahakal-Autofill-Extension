@@ -48,6 +48,7 @@ let countdownTimerId = null;
 let autoReloadEnabled = false;
 let autoFillEnabled = false;
 let autoContinueEnabled = false;
+let aartiReminders = { bhasma_aarti: false, sandhya_aarti: false, shayan_aarti: false };
 let autoReloadTriggeredForTarget = '';
 
 const TIMED_OPENING_WINDOWS = {
@@ -176,15 +177,34 @@ function syncBackgroundWatcher(armed, mode, skipImmediate = false) {
   );
 }
 
-function syncAutomationCheckboxes({ isTimed = false } = {}) {
+function syncAutomationCheckboxes({ isTimed = false, isTimedMode = false } = {}) {
   const autoControls = $('automationControls');
+  const remWrap = $('lblReminder');
+  const chkRem = $('chkReminder');
+  const txtRem = $('txtReminder');
   const autoWrap = $('lblAutoReload');
   const chkAuto = $('chkAutoReload');
   const fillWrap = $('lblAutoFill');
   const chkFill = $('chkAutoFill');
   const continueWrap = $('lblAutoContinue');
   const chkContinue = $('chkAutoContinue');
+  const showRem = Boolean(isTimed || isTimedMode);
   if (autoControls) autoControls.classList.remove('hidden');
+  if (remWrap) remWrap.classList.toggle('hidden', !showRem);
+  if (chkRem && showRem) {
+    chkRem.checked = Boolean(aartiReminders[vault.bookingMode]);
+  }
+  if (txtRem && showRem) {
+    const win = TIMED_OPENING_WINDOWS[vault.bookingMode];
+    if (win) {
+      let mins = win.openHour * 60 + win.openMinute - 5;
+      if (mins < 0) mins += 1440;
+      const h = Math.floor(mins / 60);
+      const m = mins % 60;
+      const remTime = `${h % 12 || 12}:${String(m).padStart(2, '0')} ${h >= 12 ? 'PM' : 'AM'}`;
+      txtRem.textContent = vault.lang === 'hi' ? `🔔 5मि अलर्ट (${remTime})` : `🔔 5m Alert (${remTime})`;
+    }
+  }
   if (autoWrap) autoWrap.classList.toggle('hidden', !isTimed);
   if (chkAuto) chkAuto.checked = autoReloadEnabled;
   if (fillWrap) fillWrap.classList.remove('hidden');
@@ -200,7 +220,7 @@ function startServiceCountdown(mode, isMatched, liveStatus) {
   const reloadBtn = $('btnReloadPortalTab');
   if (!win || !bar) return;
 
-  syncAutomationCheckboxes({ isTimed: Boolean(isMatched) });
+  syncAutomationCheckboxes({ isTimed: Boolean(isMatched), isTimedMode: true });
 
   // Keep on-page widget available with Auto Fill even when form is open
   if (isMatched && liveStatus?.hasForm) {
@@ -1157,6 +1177,12 @@ function applyLanguage() {
   if ($('txtAutoReload')) $('txtAutoReload').textContent = t.autoReload;
   if ($('txtAutoFill')) $('txtAutoFill').textContent = t.autoFill;
   if ($('txtAutoContinue')) $('txtAutoContinue').textContent = t.autoContinue;
+  if (TIMED_OPENING_WINDOWS[vault.bookingMode]) {
+    syncAutomationCheckboxes({
+      isTimed: Boolean(activeTabInfo.onPortal && activeTabInfo.detectedMode === vault.bookingMode),
+      isTimedMode: true,
+    });
+  }
   const tabBtns = document.querySelectorAll('.tab-btn');
   if (tabBtns[0]) {
     tabBtns[0].childNodes[0].nodeValue = t.tabDevotees + ' ';
@@ -1651,6 +1677,66 @@ function bindEvents() {
     });
   });
 
+  $('chkReminder')?.addEventListener('change', (e) => {
+    const enabled = Boolean(e.target.checked);
+    const mode = vault.bookingMode;
+    aartiReminders = { ...aartiReminders, [mode]: enabled };
+    chrome.runtime.sendMessage({ type: 'SET_AARTI_REMINDER', mode, enabled }, (r) => {
+      const lastErr = chrome.runtime.lastError?.message || '';
+      if (lastErr || !r?.ok) {
+        const reloadHint = /port closed|receiving end/i.test(lastErr)
+          ? 'Open chrome://extensions and click ↻ Reload on Mahakal Autofill to activate v1.4.6 reminders.'
+          : (r?.error || lastErr || 'Could not save reminder.');
+        showStatus(reloadHint, 'err');
+        return;
+      }
+      if (r.reminders) aartiReminders = r.reminders;
+      const isMatched = activeTabInfo.onPortal && activeTabInfo.detectedMode === mode;
+      if (isMatched) syncOnPageTimerWidget(true, mode);
+    });
+    const win = TIMED_OPENING_WINDOWS[mode];
+    const mins = win ? (win.openHour * 60 + win.openMinute - 5 + 1440) % 1440 : 475;
+    const h = Math.floor(mins / 60);
+    const m = mins % 60;
+    const remClock = `${h % 12 || 12}:${String(m).padStart(2, '0')} ${h >= 12 ? 'PM' : 'AM'} IST`;
+    showStatus(
+      enabled
+        ? `🔔 5-min reminder ON for ${MODE_LABELS[mode]} — alerts daily at ${remClock} (desktop notification + portal widget).`
+        : `5-min reminder turned off for ${MODE_LABELS[mode]}.`,
+      'info'
+    );
+  });
+
+  $('btnTestReminder')?.addEventListener('click', () => {
+    const mode = TIMED_OPENING_WINDOWS[vault.bookingMode] ? vault.bookingMode : 'bhasma_aarti';
+    chrome.runtime.sendMessage({ type: 'TEST_AARTI_REMINDER', mode }, (r) => {
+      const lastErr = chrome.runtime.lastError?.message || '';
+      if (!lastErr && r?.ok) {
+        if (!r.notifOk) {
+          showStatus(
+            `⚠ Widget updated (${r.widgetTabsUpdated || 0} tab), but desktop notification failed: ${r.notifError || 'check Chrome/Windows notification settings'}.`,
+            'warn'
+          );
+        } else if (r.notifPermission === 'denied') {
+          showStatus(
+            `⚠ Chrome notifications are muted in OS/Chrome settings (widget shown on ${r.widgetTabsUpdated || 0} tab). Enable Chrome notifications in Windows Settings to see desktop popups.`,
+            'warn'
+          );
+        } else {
+          const tabNote = r.widgetTabsUpdated > 0
+            ? ` + widget shown on ${r.widgetTabsUpdated} tab${r.widgetTabsUpdated > 1 ? 's' : ''}`
+            : ' (open a webpage tab to also preview the floating widget)';
+          showStatus(`🔔 Test reminder sent for ${MODE_LABELS[mode]}! Desktop notification fired${tabNote}.`, 'ok');
+        }
+      } else {
+        const msg = /port closed|receiving end/i.test(lastErr)
+          ? 'Extension worker needs a reload — go to chrome://extensions, click ↻ Reload on Mahakal Autofill (v1.4.6), then click Test again.'
+          : `Could not trigger test reminder: ${r?.error || lastErr || 'unknown error'}`;
+        showStatus(msg, 'err');
+      }
+    });
+  });
+
   $('chkAutoReload')?.addEventListener('change', (e) => {
     autoReloadEnabled = Boolean(e.target.checked);
     try {
@@ -1908,6 +1994,17 @@ function bindEvents() {
       if (typeof wRes.watcher.autoReload === 'boolean') autoReloadEnabled = wRes.watcher.autoReload;
       if (typeof wRes.watcher.autoFill === 'boolean') autoFillEnabled = wRes.watcher.autoFill;
       if (typeof wRes.watcher.autoContinue === 'boolean') autoContinueEnabled = wRes.watcher.autoContinue;
+    }
+  } catch (_) {}
+  try {
+    const rRes = await new Promise((resolve) => {
+      chrome.runtime.sendMessage({ type: 'GET_AARTI_REMINDERS' }, (r) => {
+        if (chrome.runtime.lastError) return resolve(null);
+        resolve(r);
+      });
+    });
+    if (rRes?.ok && rRes.reminders) {
+      aartiReminders = { ...aartiReminders, ...rRes.reminders };
     }
   } catch (_) {}
   vault = await loadVault();

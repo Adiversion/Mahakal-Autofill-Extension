@@ -3,7 +3,7 @@
   "name": "Mahakal Darshan Autofill — Bhasma Aarti & Shighra Darshan Helper",
   "short_name": "Mahakal Autofill",
   "description": "Free 1-click devotee form autofill for Shri Mahakaleshwar Temple (Bhasma Aarti & Shighra Darshan) with encrypted local family vault.",
-  "version": "1.4.5",
+  "version": "1.4.6",
   "action": {
     "default_popup": "popup/popup.html",
     "default_title": "Mahakal Darshan Autofill",
@@ -22,7 +22,9 @@
     "storage",
     "activeTab",
     "scripting",
-    "tabs"
+    "tabs",
+    "alarms",
+    "notifications"
   ],
   "host_permissions": [
     "https://www.shrimahakaleshwar.mp.gov.in/*",

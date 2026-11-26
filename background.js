@@ -3,6 +3,16 @@ import { loadVault, saveVault } from './lib/vault.js';
 
 const PORTAL_HOST_PATTERN = /(^|\.)(shrimahakaleshwar\.mp\.gov\.in|mponline\.gov\.in|mahakaleshwar\.mp\.gov\.in)$/i;
 const WATCHER_KEY = 'mahakalAutoWatcherV1';
+const REMINDERS_KEY = 'mahakalAartiRemindersV1';
+const REMINDER_LEAD_MINUTES = 5;
+const PORTAL_MODE_URLS = {
+  sheeghra_darshan: 'https://www.shrimahakaleshwar.mp.gov.in/services/slot-booking?type=sheeghra-darshan',
+  bhasma_aarti: 'https://www.shrimahakaleshwar.mp.gov.in/services/bhasmaarti',
+  advance_bhasma_aarti: 'https://www.shrimahakaleshwar.mp.gov.in/services/advance-bhasmaarti',
+  sandhya_aarti: 'https://www.shrimahakaleshwar.mp.gov.in/services/sandhya-aarti',
+  shayan_aarti: 'https://www.shrimahakaleshwar.mp.gov.in/services/shayan-aarti',
+  dharmshala: 'https://www.shrimahakaleshwar.mp.gov.in/services/dharmshala-slot-booking',
+};
 const pendingReloadTimers = new Map();
 const tabLoadSeq = new Map();
 const autoFilledLoadKeys = new Map();
@@ -169,6 +179,264 @@ function setWatcher(patch) {
   });
 }
 
+function getReminders() {
+  return new Promise((resolve) => {
+    chrome.storage.local.get([REMINDERS_KEY], (res) => {
+      const raw = res?.[REMINDERS_KEY] || {};
+      resolve({
+        bhasma_aarti: Boolean(raw.bhasma_aarti),
+        sandhya_aarti: Boolean(raw.sandhya_aarti),
+        shayan_aarti: Boolean(raw.shayan_aarti),
+      });
+    });
+  });
+}
+
+async function setReminders(patch) {
+  const prev = await getReminders();
+  const next = { ...prev, ...patch };
+  await new Promise((resolve) => chrome.storage.local.set({ [REMINDERS_KEY]: next }, resolve));
+  await syncReminderAlarms(next);
+  return next;
+}
+
+function getReminderClockLabel(mode) {
+  const win = TIMED_WINDOWS[mode];
+  if (!win) return '';
+  let totalMins = win.openHour * 60 + win.openMinute - REMINDER_LEAD_MINUTES;
+  if (totalMins < 0) totalMins += 24 * 60;
+  const h = Math.floor(totalMins / 60);
+  const m = totalMins % 60;
+  const ap = h >= 12 ? 'PM' : 'AM';
+  const hh = h % 12 || 12;
+  return `${hh}:${String(m).padStart(2, '0')} ${ap}`;
+}
+
+function getNextReminderEpochMs(mode) {
+  const win = TIMED_WINDOWS[mode];
+  if (!win) return null;
+  const nowMs = Date.now();
+  const istNow = new Date(nowMs + 5.5 * 3600 * 1000);
+  const openSecs = win.openHour * 3600 + win.openMinute * 60 + (win.openSecond || 0);
+  const remSecs = openSecs - REMINDER_LEAD_MINUTES * 60;
+  const nowSecs = istNow.getUTCHours() * 3600 + istNow.getUTCMinutes() * 60 + istNow.getUTCSeconds();
+  let deltaSec = remSecs - nowSecs;
+  if (deltaSec <= 10) deltaSec += 24 * 3600;
+  return nowMs + deltaSec * 1000;
+}
+
+async function syncReminderAlarms(remindersInput = null) {
+  if (!chrome.alarms) return { ok: false, error: 'alarms API unavailable — reload extension on chrome://extensions' };
+  const reminders = remindersInput || (await getReminders());
+  for (const mode of Object.keys(TIMED_WINDOWS)) {
+    const alarmName = `mahakal-reminder-${mode}`;
+    try {
+      await chrome.alarms.clear(alarmName);
+    } catch (_) {}
+    if (reminders[mode]) {
+      const when = getNextReminderEpochMs(mode);
+      if (when) {
+        try {
+          chrome.alarms.create(alarmName, { when, periodInMinutes: 1440 });
+        } catch (_) {}
+      }
+    }
+  }
+  return { ok: true };
+}
+
+function createDesktopNotification(notifId, options) {
+  return new Promise((resolve) => {
+    if (!chrome.notifications?.create) {
+      return resolve({ ok: false, error: 'notifications permission not active — click Reload on chrome://extensions' });
+    }
+    try {
+      chrome.notifications.create(notifId, options, (createdId) => {
+        const err = chrome.runtime.lastError?.message || '';
+        if (err) return resolve({ ok: false, error: err });
+        resolve({ ok: true, id: createdId || notifId });
+      });
+    } catch (e) {
+      resolve({ ok: false, error: e?.message || String(e) });
+    }
+  });
+}
+
+function getNotificationPermissionLevel() {
+  return new Promise((resolve) => {
+    if (!chrome.notifications?.getPermissionLevel) return resolve('unknown');
+    try {
+      chrome.notifications.getPermissionLevel((level) => {
+        if (chrome.runtime.lastError) return resolve('unknown');
+        resolve(level || 'unknown');
+      });
+    } catch (_) {
+      resolve('unknown');
+    }
+  });
+}
+
+async function openOrFocusPortalMode(mode) {
+  const targetUrl = PORTAL_MODE_URLS[mode] || PORTAL_MODE_URLS.bhasma_aarti;
+  try {
+    chrome.action?.setBadgeText({ text: '' });
+  } catch (_) {}
+  try {
+    const tabs = await chrome.tabs.query({ url: ['https://www.shrimahakaleshwar.mp.gov.in/*', 'https://shrimahakaleshwar.mp.gov.in/*'] });
+    const exactTab = tabs.find((t) => detectPortalServiceFromUrl(t.url) === mode);
+    const chosen = exactTab || tabs[0];
+    if (chosen?.id) {
+      if (!exactTab) {
+        await chrome.tabs.update(chosen.id, { url: targetUrl, active: true });
+      } else {
+        await chrome.tabs.update(chosen.id, { active: true });
+      }
+      if (chosen.windowId) {
+        await chrome.windows.update(chosen.windowId, { focused: true }).catch(() => {});
+      }
+      return chosen.id;
+    }
+    const created = await chrome.tabs.create({ url: targetUrl, active: true });
+    if (created?.windowId) {
+      await chrome.windows.update(created.windowId, { focused: true }).catch(() => {});
+    }
+    return created?.id || null;
+  } catch (_) {
+    return null;
+  }
+}
+
+async function triggerAartiReminder(mode, { isTest = false } = {}) {
+  const targetMode = TIMED_WINDOWS[mode] ? mode : 'bhasma_aarti';
+  const win = TIMED_WINDOWS[targetMode];
+  const label = MODE_LABELS[targetMode] || 'Aarti Booking';
+  const ap = win.openHour >= 12 ? 'PM' : 'AM';
+  const openLabel = `${win.openHour % 12 || 12}:${String(win.openMinute).padStart(2, '0')} ${ap} IST`;
+  const notifId = `mahakal-rem-${targetMode}-${Date.now()}`;
+
+  try {
+    chrome.action?.setBadgeBackgroundColor({ color: '#dc2626' });
+    chrome.action?.setBadgeText({ text: '5m' });
+    chrome.alarms?.create('mahakal-badge-clear', { delayInMinutes: 5 });
+  } catch (_) {}
+
+  const permLevel = await getNotificationPermissionLevel();
+  const baseNotif = {
+    type: 'basic',
+    iconUrl: chrome.runtime.getURL('assets/icon-128.png'),
+    title: `${isTest ? '[Test] ' : ''}${label} opens in 5 min (${openLabel})`,
+    message: 'Verify portal login & arm Auto-Reload + Auto-Fill before the rush starts!',
+    priority: 2,
+  };
+  let notifRes = await createDesktopNotification(notifId, {
+    ...baseNotif,
+    requireInteraction: true,
+    buttons: [
+      { title: `Open ${label}` },
+      { title: 'Dismiss' },
+    ],
+  });
+  if (!notifRes.ok && chrome.notifications?.create) {
+    notifRes = await createDesktopNotification(`${notifId}-b`, baseNotif);
+  }
+
+  // Trigger the pulsing reminder widget + chime on any open Mahakaleshwar portal tab.
+  // For manual tests, if no portal tab is open, also preview the widget on the active http(s) tab via activeTab!
+  let widgetTabsUpdated = 0;
+  try {
+    const portalTabs = await chrome.tabs.query({
+      url: ['https://www.shrimahakaleshwar.mp.gov.in/*', 'https://shrimahakaleshwar.mp.gov.in/*'],
+    });
+    const watcher = await getWatcher();
+    const targetTabs = [...portalTabs];
+    if (isTest && targetTabs.length === 0) {
+      const [activeTab] = await chrome.tabs.query({ active: true, currentWindow: true });
+      if (activeTab?.id && /^https?:\/\//i.test(activeTab.url || '')) {
+        targetTabs.push(activeTab);
+      }
+    }
+    for (const tab of targetTabs) {
+      if (!tab?.id) continue;
+      const tabMode = detectPortalServiceFromUrl(tab.url) || targetMode;
+      const tabWin = TIMED_WINDOWS[tabMode] || win;
+      try {
+        await injectTimerWidget(tab.id, {
+          enabled: true,
+          forceShow: true,
+          isTimed: true,
+          mode: tabMode,
+          label: MODE_LABELS[tabMode] || label,
+          targetHour: tabWin.openHour,
+          targetMinute: tabWin.openMinute,
+          targetSecond: tabWin.openSecond || 0,
+          closeHour: tabWin.closeHour,
+          closeMinute: tabWin.closeMinute,
+          autoReload: Boolean(watcher.autoReload),
+          autoFill: Boolean(watcher.autoFill),
+          autoContinue: Boolean(watcher.autoContinue),
+          reminderAlert: true,
+          reminderMode: targetMode,
+          reminderLabel: label,
+          reminderIsTest: isTest,
+        });
+        widgetTabsUpdated += 1;
+      } catch (_) {}
+    }
+  } catch (_) {}
+
+  return {
+    ok: true,
+    notifOk: Boolean(notifRes.ok),
+    notifError: notifRes.ok ? '' : (notifRes.error || ''),
+    notifPermission: permLevel,
+    widgetTabsUpdated,
+  };
+}
+
+if (chrome.alarms) {
+  chrome.alarms.onAlarm.addListener((alarm) => {
+    if (!alarm?.name) return;
+    if (alarm.name === 'mahakal-badge-clear') {
+      try { chrome.action?.setBadgeText({ text: '' }); } catch (_) {}
+      return;
+    }
+    if (alarm.name.startsWith('mahakal-reminder-')) {
+      const mode = alarm.name.replace('mahakal-reminder-', '');
+      getReminders().then((rems) => {
+        if (rems[mode]) triggerAartiReminder(mode, { isTest: false }).catch(() => {});
+      });
+    }
+  });
+}
+
+if (chrome.notifications) {
+  const extractModeFromNotifId = (id) => {
+    const m = String(id || '').match(/^mahakal-rem-(bhasma_aarti|sandhya_aarti|shayan_aarti)-/);
+    return m ? m[1] : 'bhasma_aarti';
+  };
+  chrome.notifications.onClicked.addListener((notifId) => {
+    if (!String(notifId || '').startsWith('mahakal-rem-')) return;
+    chrome.notifications.clear(notifId);
+    openOrFocusPortalMode(extractModeFromNotifId(notifId));
+  });
+  chrome.notifications.onButtonClicked.addListener((notifId, btnIdx) => {
+    if (!String(notifId || '').startsWith('mahakal-rem-')) return;
+    chrome.notifications.clear(notifId);
+    if (btnIdx === 0) {
+      openOrFocusPortalMode(extractModeFromNotifId(notifId));
+    } else {
+      try { chrome.action?.setBadgeText({ text: '' }); } catch (_) {}
+    }
+  });
+}
+
+chrome.runtime.onInstalled?.addListener(() => {
+  syncReminderAlarms().catch(() => {});
+});
+chrome.runtime.onStartup?.addListener(() => {
+  syncReminderAlarms().catch(() => {});
+});
+
 function clearPendingReload(tabId) {
   const existing = pendingReloadTimers.get(tabId);
   if (existing) {
@@ -312,6 +580,9 @@ async function injectTimerWidget(tabId, cfg) {
   }
 
   const clockSync = cfg.isTimed !== false ? await syncTempleServerClock(false) : cachedClockSync;
+  const reminders = await getReminders();
+  const reminderEnabled = Boolean(reminders[cfg.mode]);
+  const reminderTimeLabel = getReminderClockLabel(cfg.mode);
 
   return chrome.scripting.executeScript({
     target: { tabId, allFrames: false },
@@ -333,6 +604,12 @@ async function injectTimerWidget(tabId, cfg) {
       statusBanner: String(cfg.statusBanner || ''),
       retrying: Boolean(cfg.retrying),
       clockOffsetMs: Number(clockSync?.offsetMs || 0),
+      reminderEnabled,
+      reminderTimeLabel,
+      reminderAlert: Boolean(cfg.reminderAlert),
+      reminderMode: String(cfg.reminderMode || cfg.mode || 'bhasma_aarti'),
+      reminderLabel: String(cfg.reminderLabel || cfg.label || MODE_LABELS[cfg.mode] || 'Tatkal Bhasma Aarti'),
+      reminderIsTest: Boolean(cfg.reminderIsTest),
       totalDevotees,
       maxAllowed,
       selectedCount,
@@ -417,8 +694,23 @@ async function injectTimerWidget(tabId, cfg) {
       }
 
       const fillCountLabel = cfg.selectedCount > 0 ? ` (${cfg.selectedCount})` : '';
+      const remTimeSuffix = cfg.reminderTimeLabel ? ` (${cfg.reminderTimeLabel})` : '';
+      const remSameMode = cfg.reminderMode === cfg.mode;
+      const remActionLabel = remSameMode
+        ? '⚡ Arm Auto-Reload'
+        : `Open ${cfg.reminderLabel} ↗`;
 
       widget.innerHTML = `
+        <div id="mkReminderBanner" style="display:${cfg.reminderAlert ? 'flex' : 'none'};flex-direction:column;gap:5px;background:linear-gradient(135deg,#f59e0b,#ea580c);color:#1c1917;border-radius:8px;padding:7px 9px;margin-bottom:7px;box-shadow:0 0 0 2px rgba(253,224,71,0.55);">
+          <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;">
+            <span style="font-size:11.5px;font-weight:900;">🔔 ${cfg.reminderIsTest ? 'TEST ' : ''}5-MIN BOOKING REMINDER!</span>
+            <button id="mkReminderDismiss" type="button" style="background:rgba(28,25,23,0.16);border:none;color:#1c1917;border-radius:5px;padding:1px 6px;font-size:11px;font-weight:800;cursor:pointer;">✕</button>
+          </div>
+          <div id="mkReminderText" style="font-size:10.5px;font-weight:700;line-height:1.3;">${cfg.reminderLabel} opens in ~5 min — verify portal login &amp; ready your devotees!</div>
+          <div style="display:flex;justify-content:flex-end;gap:6px;">
+            <button id="mkReminderActionBtn" type="button" style="background:#1c1917;color:#fef3c7;border:none;border-radius:6px;padding:4px 9px;font-size:10.5px;font-weight:800;cursor:pointer;">${remActionLabel}</button>
+          </div>
+        </div>
         <div style="display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:4px;">
           <span style="font-size:11.5px;font-weight:800;color:#fde68a;">🔱 ${cfg.label}</span>
           <button id="mkTimerClose" type="button" aria-label="Close timer" style="background:none;border:none;color:#fde68a;font-size:13px;cursor:pointer;padding:0 2px;">✕</button>
@@ -427,6 +719,10 @@ async function injectTimerWidget(tabId, cfg) {
         <div id="mkTimerSub" style="font-size:10.5px;color:#fcd34d;font-variant-numeric:tabular-nums;margin-bottom:7px;">IST --:--:--</div>
         ${batchHtml}
         <div style="display:flex;flex-direction:column;gap:4px;margin-bottom:8px;">
+          <label style="display:${cfg.isTimed ? 'inline-flex' : 'none'};align-items:center;gap:5px;font-size:11px;font-weight:600;color:#fde68a;cursor:pointer;" title="Show reminder notification &amp; widget alert 5 minutes before opening time">
+            <input id="mkTimerReminder" type="checkbox" ${cfg.reminderEnabled ? 'checked' : ''} style="accent-color:#f59e0b;cursor:pointer;" />
+            <span>🔔 5m Reminder Alert${remTimeSuffix}</span>
+          </label>
           <label style="display:${cfg.isTimed ? 'inline-flex' : 'none'};align-items:center;gap:5px;font-size:11px;font-weight:600;color:#fef3c7;cursor:pointer;">
             <input id="mkTimerAutoReload" type="checkbox" ${cfg.autoReload ? 'checked' : ''} style="accent-color:#f59e0b;cursor:pointer;" />
             <span>Auto-reload (Open Time &amp; Quota Full)</span>
@@ -451,6 +747,10 @@ async function injectTimerWidget(tabId, cfg) {
 
       if (!existing) document.body.appendChild(widget);
 
+      const remBanner = widget.querySelector('#mkReminderBanner');
+      const remDismissBtn = widget.querySelector('#mkReminderDismiss');
+      const remActionBtn = widget.querySelector('#mkReminderActionBtn');
+      const chkReminder = widget.querySelector('#mkTimerReminder');
       const valEl = widget.querySelector('#mkTimerValue');
       const subEl = widget.querySelector('#mkTimerSub');
       const chkReload = widget.querySelector('#mkTimerAutoReload');
@@ -460,6 +760,58 @@ async function injectTimerWidget(tabId, cfg) {
       const reloadBtn = widget.querySelector('#mkTimerReloadBtn');
       const fillBtn = widget.querySelector('#mkTimerFillBtn');
       const closeBtn = widget.querySelector('#mkTimerClose');
+
+      const playReminderChime = () => {
+        try {
+          const AC = window.AudioContext || window.webkitAudioContext;
+          if (!AC) return;
+          const ctx = new AC();
+          const playTone = (freq, startOffset, dur) => {
+            const osc = ctx.createOscillator();
+            const gain = ctx.createGain();
+            osc.type = 'sine';
+            osc.frequency.value = freq;
+            gain.gain.setValueAtTime(0.001, ctx.currentTime + startOffset);
+            gain.gain.exponentialRampToValueAtTime(0.14, ctx.currentTime + startOffset + 0.03);
+            gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + startOffset + dur);
+            osc.connect(gain);
+            gain.connect(ctx.destination);
+            osc.start(ctx.currentTime + startOffset);
+            osc.stop(ctx.currentTime + startOffset + dur + 0.02);
+          };
+          playTone(880, 0, 0.35);
+          playTone(1174.66, 0.22, 0.55);
+          setTimeout(() => ctx.close().catch(() => {}), 1000);
+        } catch (_) {}
+      };
+
+      let reminderDismissed = false;
+      if (cfg.reminderAlert) {
+        playReminderChime();
+      }
+      remDismissBtn?.addEventListener('click', () => {
+        reminderDismissed = true;
+        if (remBanner) remBanner.style.display = 'none';
+      });
+      remActionBtn?.addEventListener('click', () => {
+        if (remSameMode) {
+          chkReload.checked = true;
+          chkAutoFill.checked = true;
+          pushWatcherUpdate(true);
+          if (remBanner) remBanner.style.display = 'none';
+          reminderDismissed = true;
+        } else {
+          chrome.runtime.sendMessage({ type: 'OPEN_PORTAL_MODE', mode: cfg.reminderMode }, () => {
+            void chrome.runtime.lastError;
+          });
+        }
+      });
+      chkReminder?.addEventListener('change', () => {
+        chrome.runtime.sendMessage(
+          { type: 'SET_AARTI_REMINDER', mode: cfg.mode, enabled: chkReminder.checked },
+          () => { void chrome.runtime.lastError; }
+        );
+      });
 
       let activeBatchIdx = cfg.initialBatch >= 0 ? cfg.initialBatch : null;
       const updateFillBtnText = () => {
@@ -568,10 +920,20 @@ async function injectTimerWidget(tabId, cfg) {
       const targetSecs = cfg.targetHour * 3600 + cfg.targetMinute * 60 + cfg.targetSecond;
       const closeSecs = cfg.closeHour * 3600 + cfg.closeMinute * 60;
       let triggeredOpenReload = false;
+      let inPageChimed = Boolean(cfg.reminderAlert);
 
       const tick = () => {
         const now = getIstNow();
         const diff = targetSecs - now.secsOfDay;
+        if (cfg.isTimed && chkReminder?.checked && !reminderDismissed && diff > 0 && diff <= 300) {
+          if (remBanner && remBanner.style.display === 'none') {
+            remBanner.style.display = 'flex';
+            if (!inPageChimed) {
+              inPageChimed = true;
+              playReminderChime();
+            }
+          }
+        }
         const driftSec = Math.round((cfg.clockOffsetMs || 0) / 1000);
         const driftWarn = Math.abs(driftSec) >= 2
           ? ` · ⚠ PC ${driftSec > 0 ? `${driftSec}s behind` : `${Math.abs(driftSec)}s ahead`}`
@@ -1217,6 +1579,48 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       } catch (err) {
         return sendResponse({ ok: false, error: err?.message || 'Failed to reload tab.' });
       }
+    })();
+    return true;
+  }
+
+  if (msg.type === 'GET_AARTI_REMINDERS') {
+    (async () => {
+      const reminders = await getReminders();
+      sendResponse({ ok: true, reminders });
+    })();
+    return true;
+  }
+
+  if (msg.type === 'SET_AARTI_REMINDER') {
+    (async () => {
+      try {
+        const mode = TIMED_WINDOWS[msg.mode] ? msg.mode : 'bhasma_aarti';
+        const reminders = await setReminders({ [mode]: Boolean(msg.enabled) });
+        sendResponse({ ok: true, reminders });
+      } catch (err) {
+        sendResponse({ ok: false, error: err?.message || 'Failed to update reminder.' });
+      }
+    })();
+    return true;
+  }
+
+  if (msg.type === 'TEST_AARTI_REMINDER') {
+    (async () => {
+      try {
+        const mode = TIMED_WINDOWS[msg.mode] ? msg.mode : 'bhasma_aarti';
+        const res = await triggerAartiReminder(mode, { isTest: true });
+        sendResponse(res || { ok: true });
+      } catch (err) {
+        sendResponse({ ok: false, error: err?.message || 'Failed to trigger reminder.' });
+      }
+    })();
+    return true;
+  }
+
+  if (msg.type === 'OPEN_PORTAL_MODE') {
+    (async () => {
+      await openOrFocusPortalMode(msg.mode || 'bhasma_aarti');
+      sendResponse({ ok: true });
     })();
     return true;
   }
