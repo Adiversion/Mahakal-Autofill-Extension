@@ -15,9 +15,18 @@ const PORTAL_MODE_URLS = {
 };
 const pendingReloadTimers = new Map();
 const tabLoadSeq = new Map();
+const tabEvalGeneration = new Map();
 const autoFilledLoadKeys = new Map();
 const autoFilledBanners = new Map();
 let cachedClockSync = { offsetMs: 0, checkedAt: 0, ok: false };
+
+function getEffectiveServerOffsetMs() {
+  if (!cachedClockSync.ok || !Number.isFinite(cachedClockSync.offsetMs)) return 0;
+  // Clamp to +-10 minutes against bogus Date headers; only delay when PC is ahead of server
+  // (when PC is behind server, Angular's own new Date().getHours() >= 8 still uses PC clock).
+  const clamped = Math.max(-600000, Math.min(600000, cachedClockSync.offsetMs));
+  return Math.min(0, clamped);
+}
 
 async function syncTempleServerClock(force = false) {
   if (!force && cachedClockSync.ok && Date.now() - cachedClockSync.checkedAt < 60000) {
@@ -55,7 +64,7 @@ const TIMED_WINDOWS = {
 
 function getWindowStateIst(mode) {
   const win = TIMED_WINDOWS[mode] || TIMED_WINDOWS.bhasma_aarti;
-  const ist = new Date(Date.now() + 5.5 * 3600 * 1000);
+  const ist = new Date(Date.now() + getEffectiveServerOffsetMs() + 5.5 * 3600 * 1000);
   const secsOfDay = ist.getUTCHours() * 3600 + ist.getUTCMinutes() * 60 + ist.getUTCSeconds();
   const openSecs = win.openHour * 3600 + win.openMinute * 60;
   const closeSecs = win.closeHour * 3600 + win.closeMinute * 60;
@@ -526,12 +535,20 @@ async function inspectTabLiveStatus(tabId) {
         isLoggedIn = Boolean(localStorage.getItem('authToken') || localStorage.getItem('auth_token'));
       } catch (_) {}
 
+      let quotaApiSettled = false;
+      try {
+        quotaApiSettled = performance
+          .getEntriesByType('resource')
+          .some((e) => /bhasmarti_limit_check|check_aarti_quota/i.test(e.name || ''));
+      } catch (_) {}
+
       return {
         ok: true,
         hasForm,
         isReviewScreen,
         isLoggedIn,
         isLoading,
+        quotaApiSettled,
         quotaFullAlert,
         closedWindowAlert,
         isRestricted,
@@ -557,6 +574,172 @@ function computeSoldOutForDay(mode, status, win = null) {
   return Boolean(status.quotaFullAlert);
 }
 
+async function injectApiMonitor(tabId) {
+  return chrome.scripting.executeScript({
+    target: { tabId, allFrames: false },
+    world: 'MAIN',
+    func: () => {
+      if (window.__mkApiMonitorInstalled) return;
+      window.__mkApiMonitorInstalled = true;
+
+      const API_HOST_RE = /prod-api\.mahakal\.brainabove\.net/i;
+      const ENDPOINT_RULES = [
+        { re: /bhasmarti_limit_check/i, label: 'Quota Check', critical: true },
+        { re: /bhasmarti_general_limit_check/i, label: 'Advance Dates', critical: true },
+        { re: /check_aarti_quota/i, label: 'Aarti Quota', critical: true },
+        { re: /general_darshan_slots/i, label: 'Darshan Slots', critical: true },
+        { re: /available_rooms/i, label: 'Room Check', critical: true },
+        { re: /dharmashala_list/i, label: 'Dharmshalas', critical: false },
+        { re: /id_proof_types/i, label: 'ID Types', critical: false },
+        { re: /relations/i, label: 'Relations', critical: false },
+        { re: /restricted_dates/i, label: 'Restricted Dates', critical: false },
+        { re: /\/countries\b/i, label: 'Countries', critical: false },
+        { re: /\/states\b/i, label: 'States', critical: false },
+        { re: /\/cities\b/i, label: 'Cities', critical: false },
+        { re: /add_image/i, label: 'Photo Upload', critical: true },
+        { re: /(?:bhasmarti_bookings|advance_bhasmarti_bookings|visitors\/v2|dharmshala_booking|aarti_bookings)/i, label: 'Booking Submit', critical: true },
+        { re: /(?:payment_gateways|make_payment|verify_payment|visitor_payment)/i, label: 'Payment API', critical: true },
+        { re: /(?:send_otp|verify_otp_and_login|login_with_password)/i, label: 'Login / OTP', critical: true },
+      ];
+
+      const classifyApi = (url) => {
+        const s = String(url || '');
+        for (const r of ENDPOINT_RULES) {
+          if (r.re.test(s)) return { label: r.label, critical: r.critical };
+        }
+        try {
+          const u = new URL(s, location.origin);
+          const seg = u.pathname.split('/').filter(Boolean).pop() || 'API';
+          return { label: seg.slice(0, 22), critical: false };
+        } catch (_) {
+          return { label: 'API Call', critical: false };
+        }
+      };
+
+      const pending = [];
+      const recent = [];
+      let seq = 0;
+
+      const publish = () => {
+        try {
+          document.documentElement.dataset.mkApiState = JSON.stringify({
+            pending: pending.map((p) => ({ id: p.id, label: p.label, critical: p.critical, startedAt: p.startedAt })),
+            recent: recent.slice(-5),
+            updatedAt: Date.now(),
+          });
+        } catch (_) {}
+      };
+
+      // Seed any API calls that already completed before this monitor attached
+      try {
+        const entries = performance.getEntriesByType('resource') || [];
+        for (const e of entries) {
+          if (!API_HOST_RE.test(e.name || '')) continue;
+          const info = classifyApi(e.name);
+          const status = Number(e.responseStatus || 200);
+          recent.push({
+            label: info.label,
+            critical: info.critical,
+            status,
+            ok: status >= 200 && status < 400,
+            durationMs: Math.round(e.duration || 0),
+            endedAt: Date.now(),
+          });
+        }
+      } catch (_) {}
+      publish();
+
+      const startReq = (url, method = 'GET') => {
+        if (!API_HOST_RE.test(String(url || ''))) return null;
+        const info = classifyApi(url);
+        const item = {
+          id: ++seq,
+          method: String(method || 'GET').toUpperCase(),
+          label: info.label,
+          critical: info.critical,
+          startedAt: Date.now(),
+        };
+        pending.push(item);
+        publish();
+        return item;
+      };
+
+      const endReq = (item, status) => {
+        if (!item) return;
+        const idx = pending.findIndex((p) => p.id === item.id);
+        if (idx >= 0) pending.splice(idx, 1);
+        const code = Number(status || 0);
+        recent.push({
+          label: item.label,
+          critical: item.critical,
+          status: code,
+          ok: code >= 200 && code < 400,
+          durationMs: Math.max(0, Date.now() - item.startedAt),
+          endedAt: Date.now(),
+        });
+        if (recent.length > 8) recent.splice(0, recent.length - 8);
+        publish();
+      };
+
+      try {
+        const origOpen = XMLHttpRequest.prototype.open;
+        const origSend = XMLHttpRequest.prototype.send;
+        XMLHttpRequest.prototype.open = function (method, url) {
+          try {
+            this.__mkReqUrl = url;
+            this.__mkReqMethod = method;
+          } catch (_) {}
+          return origOpen.apply(this, arguments);
+        };
+        XMLHttpRequest.prototype.send = function () {
+          let item = null;
+          try {
+            item = startReq(this.__mkReqUrl, this.__mkReqMethod);
+            if (item) {
+              let done = false;
+              const finish = () => {
+                if (done) return;
+                done = true;
+                endReq(item, this.status || 0);
+              };
+              this.addEventListener('loadend', finish, { once: true });
+              this.addEventListener('abort', finish, { once: true });
+              this.addEventListener('error', finish, { once: true });
+            }
+          } catch (_) {}
+          return origSend.apply(this, arguments);
+        };
+      } catch (_) {}
+
+      try {
+        const origFetch = window.fetch;
+        if (typeof origFetch === 'function') {
+          window.fetch = function (input, init) {
+            let item = null;
+            try {
+              const url = typeof input === 'string' ? input : input?.url;
+              const method = init?.method || (typeof input !== 'string' ? input?.method : 'GET');
+              item = startReq(url, method);
+            } catch (_) {}
+            const p = origFetch.apply(this, arguments);
+            if (!item) return p;
+            return p.then(
+              (res) => {
+                endReq(item, res?.status || 200);
+                return res;
+              },
+              (err) => {
+                endReq(item, 0);
+                throw err;
+              }
+            );
+          };
+        }
+      } catch (_) {}
+    },
+  });
+}
+
 async function injectTimerWidget(tabId, cfg) {
   let totalDevotees = 0;
   let maxAllowed = getMaxPersonsForMode(cfg.mode || 'bhasma_aarti');
@@ -579,7 +762,17 @@ async function injectTimerWidget(tabId, cfg) {
     } catch (_) {}
   }
 
-  const clockSync = cfg.isTimed !== false ? await syncTempleServerClock(false) : cachedClockSync;
+  // Ensure passive MAIN-world API monitor is attached so live backend queries appear in the widget
+  if (cfg.enabled) {
+    injectApiMonitor(tabId).catch(() => {});
+  }
+
+  // Never block widget injection or retry scheduling on a slow 3.5s clock sync under 8 AM rush.
+  if (cfg.isTimed !== false && (!cachedClockSync.ok || Date.now() - cachedClockSync.checkedAt >= 60000)) {
+    syncTempleServerClock(false).catch(() => {});
+  }
+  const clockSync = cachedClockSync;
+  const effectiveClockOffsetMs = getEffectiveServerOffsetMs();
   const reminders = await getReminders();
   const reminderEnabled = Boolean(reminders[cfg.mode]);
   const reminderTimeLabel = getReminderClockLabel(cfg.mode);
@@ -604,6 +797,7 @@ async function injectTimerWidget(tabId, cfg) {
       statusBanner: String(cfg.statusBanner || ''),
       retrying: Boolean(cfg.retrying),
       clockOffsetMs: Number(clockSync?.offsetMs || 0),
+      effectiveClockOffsetMs: Number(effectiveClockOffsetMs || 0),
       reminderEnabled,
       reminderTimeLabel,
       reminderAlert: Boolean(cfg.reminderAlert),
@@ -633,8 +827,8 @@ async function injectTimerWidget(tabId, cfg) {
         return;
       }
 
-      const getIstNow = () => {
-        const nowMs = Date.now();
+      const getIstNow = (offsetMs = 0) => {
+        const nowMs = Date.now() + offsetMs;
         const ist = new Date(nowMs + 5.5 * 3600 * 1000);
         return {
           h: ist.getUTCHours(),
@@ -716,7 +910,8 @@ async function injectTimerWidget(tabId, cfg) {
           <button id="mkTimerClose" type="button" aria-label="Close timer" style="background:none;border:none;color:#fde68a;font-size:13px;cursor:pointer;padding:0 2px;">✕</button>
         </div>
         <div id="mkTimerValue" style="font-size:15.5px;font-weight:800;font-variant-numeric:tabular-nums;color:${cfg.hasForm ? '#6ee7b7' : '#ffffff'};margin-bottom:2px;">--m --s</div>
-        <div id="mkTimerSub" style="font-size:10.5px;color:#fcd34d;font-variant-numeric:tabular-nums;margin-bottom:7px;">IST --:--:--</div>
+        <div id="mkTimerSub" style="font-size:10.5px;color:#fcd34d;font-variant-numeric:tabular-nums;margin-bottom:6px;">IST --:--:--</div>
+        <div id="mkApiMonitor" style="font-size:10.5px;line-height:1.35;font-variant-numeric:tabular-nums;background:rgba(0,0,0,0.28);border:1px solid rgba(245,158,11,0.35);border-radius:7px;padding:5px 7px;margin-bottom:7px;color:#fde68a;">● Watching portal APIs...</div>
         ${batchHtml}
         <div style="display:flex;flex-direction:column;gap:4px;margin-bottom:8px;">
           <label style="display:${cfg.isTimed ? 'inline-flex' : 'none'};align-items:center;gap:5px;font-size:11px;font-weight:600;color:#fde68a;cursor:pointer;" title="Show reminder notification &amp; widget alert 5 minutes before opening time">
@@ -753,6 +948,7 @@ async function injectTimerWidget(tabId, cfg) {
       const chkReminder = widget.querySelector('#mkTimerReminder');
       const valEl = widget.querySelector('#mkTimerValue');
       const subEl = widget.querySelector('#mkTimerSub');
+      const apiEl = widget.querySelector('#mkApiMonitor');
       const chkReload = widget.querySelector('#mkTimerAutoReload');
       const chkAutoFill = widget.querySelector('#mkTimerAutoFill');
       const chkContinue = widget.querySelector('#mkTimerAutoContinue');
@@ -922,9 +1118,106 @@ async function injectTimerWidget(tabId, cfg) {
       let triggeredOpenReload = false;
       let inPageChimed = Boolean(cfg.reminderAlert);
 
+      const renderApiMonitor = (syncedSecsOfDay) => {
+        if (!apiEl) return;
+        let state = null;
+        try {
+          const raw = document.documentElement.dataset.mkApiState;
+          if (raw) state = JSON.parse(raw);
+        } catch (_) {}
+
+        const pending = Array.isArray(state?.pending) ? [...state.pending] : [];
+        const recent = Array.isArray(state?.recent) ? state.recent : [];
+
+        // Fallback if Angular fired /bhasmarti_limit_check at ~114ms before injectApiMonitor attached:
+        // only infer pending if this page load actually happened at/after opening time (8:00 AM IST).
+        if (
+          pending.length === 0 &&
+          cfg.mode === 'bhasma_aarti' &&
+          syncedSecsOfDay >= targetSecs &&
+          syncedSecsOfDay < closeSecs &&
+          !cfg.hasForm
+        ) {
+          const loadMs = Number(performance.timeOrigin || 0);
+          const loadIst = loadMs ? new Date(loadMs + 5.5 * 3600 * 1000) : null;
+          const loadSecsOfDay = loadIst
+            ? loadIst.getUTCHours() * 3600 + loadIst.getUTCMinutes() * 60 + loadIst.getUTCSeconds()
+            : syncedSecsOfDay;
+          const loadedAtOrAfterOpen = loadSecsOfDay >= targetSecs && loadSecsOfDay < closeSecs;
+          const withinInitialWindow = !loadMs || Date.now() - loadMs < 20000;
+
+          let settled = recent.some((r) => /quota check/i.test(r.label || ''));
+          if (!settled) {
+            try {
+              settled = performance
+                .getEntriesByType('resource')
+                .some((e) => /bhasmarti_limit_check/i.test(e.name || ''));
+            } catch (_) {}
+          }
+          const hasErr = Boolean(document.querySelector('.global-alert.alert-error, .alert-danger'));
+          const hasLiveForm = Boolean(document.querySelector('select[formcontrolname="no_of_persons"], .visitor_row'));
+          if (loadedAtOrAfterOpen && withinInitialWindow && !settled && !hasErr && !hasLiveForm) {
+            pending.push({
+              label: 'Quota Check',
+              critical: true,
+              startedAt: Math.round(loadMs || Date.now()),
+            });
+          }
+        }
+
+        if (pending.length > 0) {
+          const focus = pending.find((p) => p.critical) || pending[0];
+          const sec = ((Date.now() - (focus.startedAt || Date.now())) / 1000).toFixed(1);
+          const extra = pending.length > 1 ? ` (+${pending.length - 1})` : '';
+          apiEl.style.background = 'rgba(120, 53, 15, 0.72)';
+          apiEl.style.borderColor = '#fb923c';
+          apiEl.style.color = '#ffedd5';
+          apiEl.textContent = focus.critical
+            ? `⏳ ${focus.label} (${sec}s)${extra} — Wait, don't reload!`
+            : `⏳ ${focus.label} (${sec}s)${extra}`;
+          if (reloadBtn && focus.critical) {
+            reloadBtn.textContent = `⏳ Wait (${sec}s)`;
+            reloadBtn.title = 'Backend request in progress — wait before reloading';
+            reloadBtn.style.background = '#78350f';
+            reloadBtn.style.color = '#fde68a';
+            reloadBtn.style.border = '1px solid #f59e0b';
+          }
+          return;
+        }
+
+        if (reloadBtn) {
+          reloadBtn.textContent = '↻ Reload';
+          reloadBtn.title = 'Reload portal page';
+          reloadBtn.style.background = '#f59e0b';
+          reloadBtn.style.color = '#1c1917';
+          reloadBtn.style.border = 'none';
+        }
+
+        apiEl.style.background = 'rgba(0,0,0,0.28)';
+        apiEl.style.borderColor = 'rgba(245,158,11,0.35)';
+        if (recent.length > 0) {
+          const chips = recent.slice(-3).map((r) => {
+            const icon = r.ok ? '✓' : '✕';
+            const dur = r.durationMs >= 1000 ? `${(r.durationMs / 1000).toFixed(1)}s` : `${r.durationMs}ms`;
+            return `${icon} ${r.label} ${dur}`;
+          });
+          const allOk = recent.slice(-3).every((r) => r.ok);
+          apiEl.style.color = allOk ? '#a7f3d0' : '#fca5a5';
+          apiEl.textContent = chips.join(' · ');
+        } else {
+          apiEl.style.color = '#fde68a';
+          apiEl.textContent =
+            cfg.isTimed && syncedSecsOfDay < targetSecs
+              ? '● Idle — quota check runs at open time'
+              : '● Idle — no active backend request';
+        }
+      };
+
       const tick = () => {
-        const now = getIstNow();
-        const diff = targetSecs - now.secsOfDay;
+        const now = getIstNow(0);
+        const syncedNow = getIstNow(cfg.effectiveClockOffsetMs || 0);
+        const diff = targetSecs - syncedNow.secsOfDay;
+        renderApiMonitor(syncedNow.secsOfDay);
         if (cfg.isTimed && chkReminder?.checked && !reminderDismissed && diff > 0 && diff <= 300) {
           if (remBanner && remBanner.style.display === 'none') {
             remBanner.style.display = 'flex';
@@ -955,8 +1248,8 @@ async function injectTimerWidget(tabId, cfg) {
         if (diff > 0) {
           valEl.textContent = `Opens in ${fmtRemaining(diff)}`;
           valEl.style.color = '#ffffff';
-        } else if (now.secsOfDay >= closeSecs) {
-          const nextDiff = 24 * 3600 - now.secsOfDay + targetSecs;
+        } else if (syncedNow.secsOfDay >= closeSecs) {
+          const nextDiff = 24 * 3600 - syncedNow.secsOfDay + targetSecs;
           valEl.textContent = `Next opens in ${fmtRemaining(nextDiff)}`;
           valEl.style.color = '#ffffff';
         } else {
@@ -977,7 +1270,13 @@ async function injectTimerWidget(tabId, cfg) {
 
 async function evaluateAndHandleArmedTab(tabId) {
   clearPendingReload(tabId);
+  const myGen = (tabEvalGeneration.get(tabId) || 0) + 1;
+  tabEvalGeneration.set(tabId, myGen);
+  const myLoadSeq = tabLoadSeq.get(tabId) || 0;
+  const isStale = () => tabEvalGeneration.get(tabId) !== myGen || (tabLoadSeq.get(tabId) || 0) !== myLoadSeq;
+
   const watcher = await getWatcher();
+  if (isStale()) return;
 
   let tab;
   try {
@@ -986,12 +1285,16 @@ async function evaluateAndHandleArmedTab(tabId) {
     if (watcher.tabId === tabId) await setWatcher({ armed: false, tabId: null });
     return;
   }
+  if (isStale()) return;
+
   const url = tab?.url || '';
   if (!isWidgetSupportedRoute(url)) {
     if (watcher.armed && watcher.tabId === tabId) {
       await setWatcher({ armed: false });
     }
-    await injectTimerWidget(tabId, { enabled: false }).catch(() => {});
+    if (!isStale()) {
+      await injectTimerWidget(tabId, { enabled: false }).catch(() => {});
+    }
     return;
   }
 
@@ -999,17 +1302,21 @@ async function evaluateAndHandleArmedTab(tabId) {
   const isTimed = isTimedService(routeMode);
   const win = isTimed ? getWindowStateIst(routeMode) : null;
   const isArmedHere = Boolean(watcher.armed && watcher.tabId === tabId);
-  const currentLoadKey = `${url}#${tabLoadSeq.get(tabId) || 0}`;
+  const currentLoadKey = `${url}#${myLoadSeq}`;
 
   // Wait for Angular loader OR async quota APIs (/bhasmarti_limit_check, /check_aarti_quota) to respond.
-  // Angular does NOT show .global-loader-overlay during quota checks:
-  //  - On Tatkal Bhasma, when /bhasmarti_limit_check resolves as "full" or "restricted", Angular immediately pops
-  //    .global-alert.alert-error (dangerAlert) -> we break out in <=100ms!
-  //  - If the server is slow under 8 AM load (dangerAlert still empty & form not yet rendered), we wait up to ~4.5s
-  //    so we never prematurely reload over an in-flight request that is about to open the form!
+  // Under 8 AM rush, /bhasmarti_limit_check commonly takes 5.5s-9s with NO .global-loader-overlay:
+  //  - Check performance.getEntriesByType('resource') (quotaApiSettled) so we NEVER abort an in-flight request.
+  //  - Once /bhasmarti_limit_check settles, allow a brief grace window (~720ms) for async AES-GCM decrypt & DOM mount,
+  //    or break immediately as soon as hasForm or dangerAlert appears!
   let status = await inspectTabLiveStatus(tabId);
-  const pollMs = win?.isOpeningRush ? 100 : 250;
-  const maxPolls = win?.isOpeningRush ? 45 : 10;
+  if (isStale()) return;
+
+  const pollMs = win?.isOpeningRush ? 120 : 250;
+  const maxPolls = win?.isOpeningRush ? 115 : 10;
+  let postSettlePolls = 0;
+  let shownWaitingBanner = false;
+
   for (let i = 0; i < maxPolls && !status?.hasForm && !status?.isReviewScreen; i++) {
     const waitingForLoader = Boolean(status?.isLoading);
     const waitingForQuotaApi = Boolean(
@@ -1018,17 +1325,40 @@ async function evaluateAndHandleArmedTab(tabId) {
       !status?.isRestricted &&
       !status?.closedWindowAlert &&
       (routeMode === 'bhasma_aarti'
-        ? !status?.dangerAlert
+        ? !status?.dangerAlert && (!status?.quotaApiSettled || postSettlePolls < 6)
         : !status?.dangerAlert && !status?.quotaFullAlert)
     );
     if (!waitingForLoader && !waitingForQuotaApi) break;
+    if (status?.quotaApiSettled) postSettlePolls++;
+
+    if (!shownWaitingBanner && i === 0 && win?.isOpen) {
+      shownWaitingBanner = true;
+      await injectTimerWidget(tabId, {
+        enabled: true,
+        mode: routeMode,
+        targetHour: win.openHour,
+        targetMinute: win.openMinute,
+        closeHour: win.closeHour,
+        closeMinute: win.closeMinute,
+        autoReload: Boolean(isArmedHere && watcher.autoReload),
+        autoFill: watcher.autoFill,
+        autoContinue: watcher.autoContinue,
+        statusBanner: '⏳ Checking portal quota — wait...',
+        retrying: Boolean(isArmedHere && watcher.autoReload),
+      }).catch(() => {});
+      if (isStale()) return;
+    }
+
     await new Promise((r) => setTimeout(r, pollMs));
+    if (isStale()) return;
     status = await inspectTabLiveStatus(tabId);
+    if (isStale()) return;
   }
   const soldOutForDay = computeSoldOutForDay(routeMode, status, win);
   status = { ...status, soldOutForDay };
 
   const latest = await getWatcher();
+  if (isStale()) return;
   const stillArmed = Boolean(isArmedHere && latest.armed && latest.tabId === tabId);
   const alreadyFilledThisLoad = autoFilledLoadKeys.get(tabId) === currentLoadKey;
   const shouldAutoFillNow = Boolean(latest.autoFill && !alreadyFilledThisLoad);
@@ -1043,6 +1373,7 @@ async function evaluateAndHandleArmedTab(tabId) {
     if (status?.hasForm && shouldAutoFillNow) {
       autoFilledLoadKeys.set(tabId, currentLoadKey);
       const fillRes = await runFillFromVault(tabId, { mode: routeMode, autoContinue: Boolean(latest.autoContinue) });
+      if (isStale()) return;
       if (fillRes?.ok) {
         banner = fillRes.continueClicked
           ? `✅ Filled ${fillRes.filledDevotees || ''} & Clicked Continue!`
@@ -1050,6 +1381,7 @@ async function evaluateAndHandleArmedTab(tabId) {
         autoFilledBanners.set(tabId, banner);
       }
     }
+    if (isStale()) return;
     await injectTimerWidget(tabId, {
       enabled: true,
       isTimed: false,
@@ -1072,6 +1404,7 @@ async function evaluateAndHandleArmedTab(tabId) {
     if (shouldAutoFillNow) {
       autoFilledLoadKeys.set(tabId, currentLoadKey);
       const fillRes = await runFillFromVault(tabId, { mode: routeMode, autoContinue: Boolean(latest.autoContinue) });
+      if (isStale()) return;
       if (fillRes?.ok) {
         banner = fillRes.continueClicked
           ? `✅ Filled ${fillRes.filledDevotees || ''} & Clicked Continue!`
@@ -1079,6 +1412,7 @@ async function evaluateAndHandleArmedTab(tabId) {
         autoFilledBanners.set(tabId, banner);
       }
     }
+    if (isStale()) return;
     await injectTimerWidget(tabId, {
       enabled: true,
       hasForm: true,
@@ -1119,6 +1453,7 @@ async function evaluateAndHandleArmedTab(tabId) {
 
   if (status?.isRestricted || status?.soldOutForDay) {
     await setWatcher({ armed: false });
+    if (isStale()) return;
     await injectTimerWidget(tabId, {
       enabled: true,
       mode: routeMode,
@@ -1158,16 +1493,21 @@ async function evaluateAndHandleArmedTab(tabId) {
       statusBanner: banner,
       retrying: true,
     });
+    if (isStale()) return;
 
+    clearPendingReload(tabId);
     const timer = setTimeout(async () => {
       pendingReloadTimers.delete(tabId);
+      if (isStale()) return;
       const curr = await getWatcher();
-      if (!curr.armed || curr.tabId !== tabId || !curr.autoReload) return;
+      if (isStale() || !curr.armed || curr.tabId !== tabId || !curr.autoReload) return;
       try {
         const currTab = await chrome.tabs.get(tabId);
+        if (isStale()) return;
         if (isReloadableBookingRoute(currTab?.url)) {
           // Final safety check: if a slow /bhasmarti_limit_check just opened the form during our wait, DO NOT reload over it!
           const preCheck = await inspectTabLiveStatus(tabId).catch(() => null);
+          if (isStale()) return;
           if (preCheck?.hasForm || preCheck?.isReviewScreen) {
             evaluateAndHandleArmedTab(tabId).catch(() => {});
             return;
@@ -1184,6 +1524,7 @@ async function evaluateAndHandleArmedTab(tabId) {
     if (waitingOutsideRush) {
       await setWatcher({ armed: false });
     }
+    if (isStale()) return;
     await injectTimerWidget(tabId, {
       enabled: true,
       mode: routeMode,
@@ -1202,32 +1543,48 @@ async function evaluateAndHandleArmedTab(tabId) {
 
 chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   if (changeInfo.status === 'loading') {
-    tabLoadSeq.set(tabId, (tabLoadSeq.get(tabId) || 0) + 1);
-    // During timed Aarti opening rush, Angular often renders the booking form BEFORE slow external scripts
-    // (Razorpay, Google Fonts, GA) fire status==='complete'. Probe early at 450ms to shave 1-2s!
+    const nextSeq = (tabLoadSeq.get(tabId) || 0) + 1;
+    tabLoadSeq.set(tabId, nextSeq);
+    tabEvalGeneration.set(tabId, (tabEvalGeneration.get(tabId) || 0) + 1);
+    clearPendingReload(tabId);
+    // Attach passive API monitor early so ngOnInit requests (e.g. /bhasmarti_limit_check at ~114ms) are visible live in the widget
     const url = changeInfo.url || tab?.url || '';
     const mode = detectPortalServiceFromUrl(url);
+    if (mode) {
+      injectApiMonitor(tabId).catch(() => {});
+    }
+    // During timed Aarti opening rush, Angular often renders the booking form BEFORE slow external scripts
+    // (Razorpay, Google Fonts, GA) fire status==='complete'. Probe early at 450ms to shave 1-2s!
     if (mode && isTimedService(mode) && getWindowStateIst(mode).isOpeningRush) {
       setTimeout(() => {
+        if ((tabLoadSeq.get(tabId) || 0) !== nextSeq) return;
         inspectTabLiveStatus(tabId)
           .then((st) => {
-            if (st?.hasForm) evaluateAndHandleArmedTab(tabId).catch(() => {});
+            if ((tabLoadSeq.get(tabId) || 0) === nextSeq && st?.hasForm) {
+              evaluateAndHandleArmedTab(tabId).catch(() => {});
+            }
           })
           .catch(() => {});
       }, 450);
     }
   }
   if (changeInfo.url) {
-    tabLoadSeq.set(tabId, (tabLoadSeq.get(tabId) || 0) + 1);
+    const nextSeq = (tabLoadSeq.get(tabId) || 0) + 1;
+    const urlGen = (tabEvalGeneration.get(tabId) || 0) + 1;
+    tabLoadSeq.set(tabId, nextSeq);
+    tabEvalGeneration.set(tabId, urlGen);
+    clearPendingReload(tabId);
     if (!isReloadableBookingRoute(changeInfo.url)) {
-      clearPendingReload(tabId);
       getWatcher().then((w) => {
         if (w.armed && w.tabId === tabId) setWatcher({ armed: false });
       });
     }
     if (isWidgetSupportedRoute(changeInfo.url)) {
-      setTimeout(() => evaluateAndHandleArmedTab(tabId).catch(() => {}), 320);
-      setTimeout(() => evaluateAndHandleArmedTab(tabId).catch(() => {}), 1100);
+      setTimeout(() => {
+        if ((tabLoadSeq.get(tabId) || 0) === nextSeq && tabEvalGeneration.get(tabId) === urlGen) {
+          evaluateAndHandleArmedTab(tabId).catch(() => {});
+        }
+      }, 320);
     } else {
       injectTimerWidget(tabId, { enabled: false }).catch(() => {});
     }
@@ -1241,6 +1598,7 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
 chrome.tabs.onRemoved.addListener(async (tabId) => {
   clearPendingReload(tabId);
   tabLoadSeq.delete(tabId);
+  tabEvalGeneration.delete(tabId);
   autoFilledLoadKeys.delete(tabId);
   autoFilledBanners.delete(tabId);
   const watcher = await getWatcher();

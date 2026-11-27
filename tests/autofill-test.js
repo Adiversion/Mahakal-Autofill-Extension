@@ -884,6 +884,54 @@ async function injectMockRuntime(page) {
     }));
     assert(!r13.ok && /quota not available/i.test(r13.error || ''), 'Sandhya Aarti mid-fill quota drop was not detected cleanly', r13);
     console.log('TEST_13_PASS: Sandhya Aarti mid-fill quota drop detected cleanly with actionable message!');
+
+    // TEST 14: Tatkal Bhasma Aarti slow /add_image upload (>2s) + missing relation blocks premature Auto-Continue
+    const p14 = await browser.newPage();
+    await p14.setContent(`<!DOCTYPE html>
+      <html><body>
+        <form>
+          <div class="visitor_row">
+            <div class="form-field"><input formcontrolname="full_name" type="text" /><label>Name *</label></div>
+            <div class="photo-upload-box"><div class="preview" style="display:none"><img id="slImg" /></div><label><input id="slFile" type="file" hidden accept="image/*" /></label></div>
+            <div class="form-field"><select formcontrolname="relationship_id" id="slRel"><option value="0: 0">Select</option><option value="1: 9">Self</option></select><label>Relationship *</label></div>
+            <div class="form-field"><select formcontrolname="id_proof_type_id" id="slIdType"><option value="0: 0">Select</option><option value="1: 1">Aadhaar Card</option></select><label>ID Proof Type *</label></div>
+            <div class="form-field"><input formcontrolname="id_proof_number" type="text" /><label>ID Proof Number *</label></div>
+          </div>
+          <button type="submit" name="send" class="btn btn-primary" id="slCont">Continue</button>
+        </form>
+        <script>
+          window.__slClicked = false;
+          document.getElementById('slFile').addEventListener('change', () => {
+            const img = document.getElementById('slImg');
+            img.parentElement.style.display = 'block';
+            img.setAttribute('src', 'data:image/jpeg;base64,slow');
+            setTimeout(() => img.setAttribute('src', 'https://prod-api.mahakal.brainabove.net/uploads/slow.jpg'), 1600);
+          });
+          document.getElementById('slCont').addEventListener('click', (e) => {
+            e.preventDefault();
+            window.__slClicked = true;
+          });
+        </script>
+      </body></html>`);
+    await injectMockRuntime(p14);
+    const r14 = await p14.evaluate((img) => new Promise((resolve) => {
+      window.__listeners[0](
+        {
+          action: 'FILL_BOOKING_FORM',
+          bookingMode: 'bhasma_aarti',
+          personCount: 1,
+          autoContinue: true,
+          devotees: [
+            { name: 'Slow Upload Devotee', relation: 'Self', idType: 'Aadhaar Card', idNumber: '444455556666', photo: { name: 'slow.jpg', type: 'image/png', dataUrl: img } },
+          ],
+        },
+        {},
+        resolve
+      );
+    }), TINY_IMG);
+    const slClicked = await p14.evaluate(() => window.__slClicked);
+    assert(r14.ok && r14.continueClicked && slClicked, 'Slow upload Auto-Continue failed', r14);
+    console.log('TEST_14_PASS: Slow /add_image upload completed cleanly and triggered Continue!');
   } finally {
     await browser.close();
   }

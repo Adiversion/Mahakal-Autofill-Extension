@@ -1122,7 +1122,8 @@
           let continueResult = null;
           if (msg.autoContinue && filledCount > 0) {
             showPageToast(`${prefix}Filled ${filledDevotees} devotee(s) — waiting for photo uploads to click Continue...`);
-            continueResult = await waitForUploadsAndClickContinue(15000, expectedPhotoCount);
+            const uploadTimeoutMs = expectedPhotoCount > 1 ? 30000 : expectedPhotoCount === 1 ? 20000 : 15000;
+            continueResult = await waitForUploadsAndClickContinue(uploadTimeoutMs, expectedPhotoCount);
           }
 
           const continueNote = continueResult
